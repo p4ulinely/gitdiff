@@ -17,7 +17,7 @@ Nada é enviado para fora: o `.git` é lido localmente pelo navegador.
 - Painéis de commits e de arquivos alterados, ambos recolhíveis e redimensionáveis
 - Arquivos alterados em lista ou em árvore de pastas, com filtro e contagem de +/−
 - Diff unificado ou lado a lado, com destaque das palavras alteradas
-- Realce de sintaxe pela extensão do arquivo, ligado por padrão (botão **Sintaxe**): C# (`.cs`), JavaScript/JSX, TypeScript/TSX, HTML, CSS/SCSS/Less, Razor (`.cshtml`), Vue, Python, C, C++ e Java
+- Realce de sintaxe pela extensão do arquivo, ligado por padrão (botão **Sintaxe**): C# (`.cs`), JavaScript/JSX, TypeScript/TSX, HTML, CSS/SCSS/Less, Razor (`.cshtml`), Vue, Python, C, C++, Java, YAML e Dockerfile (detectado pelo nome: `Dockerfile`, `Dockerfile.dev`, `*.dockerfile`, `Containerfile`)
 - Detecção de renomeações exatas, de arquivos binários e de submódulos, com prévia de imagens antes/depois
 - Atalhos: `j`/`k` para o próximo/anterior commit, `n`/`p` para o próximo/anterior arquivo
 - No Chrome/Edge, o botão **Reabrir** volta à última pasta usada

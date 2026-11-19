@@ -16,7 +16,7 @@ Visualizador de diferenças git que roda no navegador e é estático. O `.git` �
 | `js/fs.js` | Interface mínima de FS: `getFile(path) → File\|null` e `list(path) → [{name, kind}]`. Implementações `HandleFS` e `FileListFS`. |
 | `js/git.js` | `Repo`: objetos soltos, packfiles (idx v2, OFS/REF_DELTA), refs, packed-refs, `resolve()` (hash abreviado, refs, `~N`/`^N`), `diffTrees`, `diffCommit` (com renomeações exatas). `LogWalker`: histórico por data do committer. |
 | `js/diff.js` | Myers O(ND) com limite `maxD`. Acima dele usa o fallback *patience* (âncoras em linhas únicas + LIS). Também `buildHunks` e `intraline`, que devolve intervalos `[início, fim)` das palavras alteradas. Não depende do DOM. |
-| `js/highlight.js` | Realce de sintaxe próprio (lexers à mão com regex sticky). Linguagens: C# (principal), JS, TS, HTML, CSS, Razor (`.cshtml`/`.razor`), Vue, Python, C, C++ e Java. JS, TS, C#, C, C++ e Java compartilham o `lexCode`, com ramos por linguagem. Python tem lexer próprio (`lexPython`). O mapeamento de extensões fica em `EXT`, e `.h` é tratado como C++ (as palavras-chave de C++ incluem as de C). `Highlight.lines(texto, lang)` devolve tokens `[classe, texto]` por linha. Não depende do DOM. |
+| `js/highlight.js` | Realce de sintaxe próprio (lexers à mão com regex sticky). A lista de linguagens é `LANGUAGES` (C# é a principal); não a repita aqui. JS/JSX, TS/TSX, C#, C, C++ e Java compartilham o `lexCode`, com ramos por linguagem. HTML/Razor/Vue usam o `lexHtml`, e CSS/SCSS/Less o `lexCss`. Python, YAML e Dockerfile têm lexers próprios (`lexPython`, `lexYaml`, `lexDocker`); YAML e Dockerfile são orientados a linha. Arquivos sem extensão (Dockerfile) são reconhecidos pelo nome em `BY_NAME`, que é checado antes de `EXT` em `langFor`. O mapeamento de extensões fica em `EXT`, e `.h` é tratado como C++ (as palavras-chave de C++ incluem as de C). `Highlight.lines(texto, lang)` devolve tokens `[classe, texto]` por linha. Não depende do DOM. |
 | `js/i18n.js` | `t()`, `html()`, plurais, fallback para `en`, `data-i18n*`, `I18n.missing(code)`. |
 | `js/app.js` | Toda a interface e o estado (`state`). |
 
@@ -34,7 +34,7 @@ Pontos que não são óbvios:
   - **Arquivo inteiro:** os lados antigo e novo são tokenizados inteiros, nunca por hunk, para que comentários e strings de várias linhas e blocos Razor saiam certos. Isso é feito em `ensureTokens(ch)` no `renderFileBody` (o único caminho de renderização do corpo), só para arquivos exibidos com realce. O resultado fica em `ch.diff.tokA`/`tokB`. **Não guarde o texto dos arquivos no diff:** as estatísticas são calculadas para todos os arquivos do commit, e guardar o texto multiplicaria a memória. Os blobs são relidos do cache do repositório.
   - **Heurísticas de classificação** (`classify`): depois de `.`/`->` é sempre membro, nunca palavra-chave (`promise.catch`, `map.get`); CAIXA_ALTA é constante (`lit`); `match`/`case` do Python só são palavra-chave no início de instrução; contextuais do C# usadas como nome de variável (`file`, `value`…) ficam fora da lista.
   - **Combinação com o destaque de palavras:** `lineHTML()` no `app.js` corta os tokens nos limites dos intervalos do `intraline`, para que `<mark>` e `<span class="hl-*">` fiquem bem aninhados.
-  - **Para adicionar uma linguagem:** (1) um lexer ou um ramo no `lexCode`; (2) as extensões em `EXT`; (3) o nome em `LANGUAGES`, que alimenta a dica do botão via `{langs}`, sem mexer nas traduções; (4) a linha de recursos no README; (5) fuzzing + amostra real.
+  - **Para adicionar uma linguagem ou extensão:** siga o checklist da seção [Como adicionar uma linguagem ao realce de sintaxe](#como-adicionar-uma-linguagem-ao-realce-de-sintaxe).
   - **Ligar/desligar é só CSS:** o HTML sai com as cores sempre que os tokens existem, e `setHighlight` alterna `.no-hl` em `#diffs`. Ao ligar, só os corpos marcados `data-plain` (exibidos sem tokens) são refeitos. Com a sintaxe desligada, nada é tokenizado. **Não volte a re-renderizar o painel inteiro nessa troca.**
   - **Cache de linha:** `hunk.ready` guarda o modo (`'hl'`/`'plain'`, conforme existam tokens). O destaque de palavras (`line.ranges`) é calculado uma vez por hunk (`hunk.ranged`).
   - **Invariantes do highlighter:** (1) a concatenação dos tokens é exatamente o texto de entrada; (2) todo laço de lexer consome pelo menos um caractere. Quebrar qualquer uma delas faz texto sumir ou trava a aba.
@@ -56,6 +56,66 @@ Pontos que não são óbvios:
 - **Escape sempre.** Todo dado vindo do repositório (mensagens, nomes, caminhos, conteúdo) passa por `esc()` antes de ir para o `innerHTML`.
 - **Estilo:** comentários em português, CSS com variáveis em `:root`, tema claro/escuro via `prefers-color-scheme`.
 - **Handlers assíncronos de evento** são envolvidos em `run(fn)`, que mostra o erro num toast.
+
+## Como adicionar uma linguagem ao realce de sintaxe
+
+Siga o checklist inteiro: cada item já foi esquecido pelo menos uma vez. Tudo fica em `js/highlight.js`, salvo onde indicado.
+
+### Caso A: só uma extensão nova para uma linguagem que já existe
+
+Exemplos: `.mjs` → JS, `.razor` → Razor, `Containerfile` → Dockerfile.
+
+- [ ] **Mapeamento:**
+  - extensão → `EXT` (chave em minúsculas, sem ponto);
+  - arquivo sem extensão ou reconhecido pelo nome → `BY_NAME` (regex sobre o nome do arquivo em minúsculas, checada antes de `EXT`).
+- [ ] **`LANGUAGES`:** só mude o nome exibido se a variante for relevante (ex.: `'CSS/SCSS/Less'`).
+- [ ] **README:** atualize a linha "Realce de sintaxe" em Recursos.
+- [ ] **Teste:** confira `Highlight.langFor('caminho/arquivo.ext')` e também um nome parecido que **não** deve casar.
+
+### Caso B: uma linguagem nova
+
+1. **Escolha onde fica o lexer:**
+   - **C-like** (chaves, `//`, `/* */`): reaproveite o `lexCode`. Adicione o código da linguagem em **`CODE_KW` e `CODE_LIT`**; sem isso, `classify` quebra com `undefined.has`. As particularidades entram em ramos `if (lang === 'x')`. Confira também as condições que já listam linguagens: `js`/`jsx`/`cFamily` no início do `lexCode` e a escolha do regex de identificador.
+   - **Outra sintaxe:** escreva um `lexX(lx, opts)` próprio e despache no `tokenize()`. Linguagens orientadas a linha (YAML, Dockerfile) costumam ficar mais simples processando linha a linha, como `lexYaml`/`lexDocker`.
+2. **Respeite as invariantes:**
+   - a concatenação dos tokens é **exatamente** o texto de entrada. Use só `lx.emit(cls, fatia_do_fonte)` e `lx.emitTo(cls, fim)`;
+   - **todo laço consome pelo menos um caractere.** Termine com um fallback que emita um caractere, e garanta que quem chama consome o que um sub-lexer deixou ao retornar (`'}'`, `'\n'`…);
+   - construções de várias linhas funcionam naturalmente, porque o arquivo inteiro é tokenizado. Se a linguagem puder vir embutida em outra (como `<script>`/`<style>`), aceite `opts.until`/`opts.stop`.
+3. **Use só as classes de token existentes:** `kw str com num fn type tag attr meta lit re`. Uma classe nova exige uma variável `--hl-x` em `:root` **e** no bloco escuro do `css/style.css`, mais a regra `.hl-x`. A regra `.no-hl [class*="hl-"]` já cobre o desligamento.
+4. **Evite as armadilhas que já apareceram:**
+   - palavra-chave depois de `.`/`->` é membro (`promise.catch`, `re.match`);
+   - palavras-chave contextuais e "suaves" também são usadas como nome de variável (`value`, `file`, `match`);
+   - CAIXA_ALTA é constante (`lit`), não tipo;
+   - `#` e `//` dentro de URLs e strings não são comentário;
+   - `<` pode ser comparação ou generic;
+   - linguagens embutidas não podem passar do delimitador de fechamento (`clampEnd`).
+5. **Mapeamento:** `EXT` e/ou `BY_NAME`.
+6. **`LANGUAGES`:** acrescente o nome exibido. Ele alimenta a dica do botão Sintaxe via `{langs}`. **Não edite as traduções** por causa disso; só crie chaves (em `en.js` **e** `pt-BR.js`) se surgir texto novo de interface.
+7. **Documentação:**
+   - README: a linha "Realce de sintaxe" em Recursos;
+   - este arquivo: a linha do `highlight.js` na tabela de Arquitetura, só se houver lexer próprio ou heurística não óbvia, e um item em "Realce de sintaxe" se a heurística merecer explicação.
+8. **Testes:** todos obrigatórios; veja "Como testar".
+   - `node --check js/*.js js/locales/*.js`;
+   - **fuzzing** da linguagem nova (modelo abaixo), com fragmentos que estressem os delimitadores dela;
+   - **amostra real** impressa como `[classe:texto]`, conferida a olho, com os casos difíceis da linguagem;
+   - **regressão:** o fuzzing das outras linguagens, o teste do `lineHTML` (sintaxe + destaque de palavras), o JS do próprio projeto sem tags JSX falsas, e o teste de ponta a ponta se o `app.js` foi alterado.
+
+Modelo de fuzzing (Node 22, salve com a ferramenta de escrita de arquivos):
+
+```js
+import fs from 'node:fs'; import vm from 'node:vm';
+globalThis.window = globalThis;
+vm.runInThisContext(fs.readFileSync('js/highlight.js', 'utf8'));
+const lang = 'x', frag = ['a', '"', "'", '\\', '\n', ' ', '{', '}', '#', '//', '/*', '*/' /* + delimitadores da linguagem */];
+let fails = 0;
+for (let n = 0; n < 5000; n++) {
+  let src = '';
+  for (let i = 0, len = Math.random() * 80 | 0; i < len; i++) src += frag[Math.random() * frag.length | 0];
+  if (Highlight.tokenize(src, lang).map((t) => t[1]).join('') !== src) fails++;   // não perde nem duplica texto
+  if (Highlight.lines(src, lang).length !== src.split('\n').length) fails++;        // número de linhas bate
+}
+console.log('falhas', fails); // deve ser 0, e o script precisa terminar (não pode travar)
+```
 
 ## Como testar
 

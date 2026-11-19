@@ -1,7 +1,7 @@
 /* Realce de sintaxe sem dependências.
  *
  * Linguagens: C# (principal), JavaScript, TypeScript, HTML, CSS (scss/less básico),
- * Razor (.cshtml/.razor), Vue (SFC), Python, C, C++ e Java.
+ * Razor (.cshtml/.razor), Vue (SFC), Python, C, C++, Java, YAML e Dockerfile.
  *
  * O texto é tokenizado inteiro (não linha a linha), para que construções de várias
  * linhas — comentários, strings verbatim/raw do C#, template strings, blocos Razor,
@@ -98,6 +98,7 @@
     scope: /::/y,
     pyString: /([rRbBuUfF]{0,2})('''|"""|'|")/y,
     pyDecorator: /@[\w.]+/y,
+    heredoc: /<<-?[ \t]*(["']?)(\w+)\1/y,
   };
 
   // Um comentário não pode passar de </script> ou </style>: o navegador fecha a tag ali.
@@ -866,6 +867,166 @@
     }
   }
 
+  /* ---------- YAML ----------
+   * Por linha. Um bloco "|" ou ">" continua enquanto as linhas tiverem indentação maior
+   * que a da linha que o abriu (ou forem vazias). */
+  const YAML_KEY = /(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\n]|'')*'|[^\s#'"{}[\],:&*!|>%@`](?:[^\n:#]|:(?![ \t\r\n])|(?<![ \t])#)*?)(?=[ \t]*:(?:[ \t]|\r?\n|\r?$))/y;
+  const YAML_NUM = /^[-+]?(?:\d[\d_]*(?:\.\d*)?(?:[eE][-+]?\d+)?|\.\d+|0x[\da-fA-F_]+|0o[0-7_]+|\.inf|\.nan)$/i;
+  const YAML_LIT = /^(?:true|false|yes|no|on|off|null|~)$/i;
+  const isWs = (ch) => ch === ' ' || ch === '\t' || ch === '\r';
+
+  function lexYamlValue(lx, end, indent) {
+    const s = lx.s;
+    let flow = 0;
+    while (lx.p < end) {
+      const c = s[lx.p];
+      if (isWs(c)) { lx.emit(null, lx.re(/[ \t\r]+/y)); continue; }
+      if (c === '#' && (lx.p === 0 || /\s/.test(s[lx.p - 1]))) { lx.emitTo('com', end); break; }
+      if (flow === 0 && (c === '|' || c === '>') && /^[|>][-+0-9]*[ \t]*(?:#.*)?\r?$/.test(s.slice(lx.p, end))) {
+        lx.emit('meta', lx.re(/[|>][-+0-9]*/y));
+        const w = lx.re(/[ \t]+/y);
+        if (w) lx.emit(null, w);
+        if (lx.p < end) lx.emitTo(s[lx.p] === '#' ? 'com' : null, end);
+        return indent; // começa um bloco de texto
+      }
+      if (c === '"' || c === "'") { lexQuoted(lx, c); continue; }
+      if ((c === '&' || c === '*') && /[\w-]/.test(s[lx.p + 1] || '')) { lx.emit('meta', lx.re(/[&*][^\s,{}[\]]+/y)); continue; }
+      if (c === '!') { lx.emit('meta', lx.re(/![^\s,{}[\]]*/y)); continue; }
+      if (c === '{' || c === '[') { flow++; lx.emit(null, c); continue; }
+      if (c === '}' || c === ']') { flow = Math.max(0, flow - 1); lx.emit(null, c); continue; }
+      if (c === ':' || (c === ',' && flow > 0)) { lx.emit(null, c); continue; }
+      // escalar simples: até " #", ": ", fim da linha ou (em {} / []) um separador
+      let i = lx.p;
+      while (i < end) {
+        const ch = s[i];
+        if (ch === '#' && isWs(s[i - 1])) break;
+        if (ch === ':' && (i + 1 >= end || isWs(s[i + 1]) || (flow > 0 && ',[]{}'.includes(s[i + 1])))) break;
+        if (flow > 0 && ',[]{}'.includes(ch)) break;
+        i++;
+      }
+      let j = i;
+      while (j > lx.p && isWs(s[j - 1])) j--;
+      if (j === lx.p) { lx.emit(null, c); continue; }
+      const word = s.slice(lx.p, j);
+      const flowKey = flow > 0 && s[i] === ':';
+      lx.emit(flowKey ? 'attr' : YAML_NUM.test(word) ? 'num' : YAML_LIT.test(word) ? 'lit' : 'str', word);
+    }
+    return -1;
+  }
+
+  function lexYamlLine(lx, end, indent) {
+    const s = lx.s;
+    const ws = () => {
+      const m = lx.re(/[ \t\r]+/y);
+      if (m) lx.emit(null, s.slice(lx.p, Math.min(lx.p + m.length, end)));
+    };
+    ws();
+    if (lx.p >= end) return -1;
+    if (indent === 0 && /^(?:---|\.\.\.)(?:\s|$)/.test(s.slice(lx.p, end))) { lx.emit('meta', s.slice(lx.p, lx.p + 3)); ws(); }
+    if (lx.p >= end) return -1;
+    if (s[lx.p] === '#') { lx.emitTo('com', end); return -1; }
+    if (s[lx.p] === '%' && indent === 0) { lx.emitTo('meta', end); return -1; } // %YAML 1.2
+    while (s[lx.p] === '-' && (lx.p + 1 >= end || isWs(s[lx.p + 1]))) { lx.emit(null, '-'); ws(); } // "- " de lista
+    const key = lx.re(YAML_KEY);
+    if (key && lx.p + key.length <= end) {
+      lx.emit('attr', key);
+      ws();
+      lx.emit(null, ':');
+    }
+    return lexYamlValue(lx, end, indent);
+  }
+
+  function lexYaml(lx) {
+    const s = lx.s;
+    let block = -1; // indentação da linha que abriu um bloco | ou >; -1 = fora de bloco
+    while (!lx.eof()) {
+      let end = s.indexOf('\n', lx.p);
+      if (end < 0) end = lx.n;
+      const line = s.slice(lx.p, end);
+      const indent = /^ */.exec(line)[0].length;
+      if (block >= 0 && (line.trim() === '' || indent > block)) {
+        lx.emitTo('str', end);
+      } else {
+        block = lexYamlLine(lx, end, indent);
+        if (lx.p < end) lx.emitTo(null, end); // segurança
+      }
+      if (s[lx.p] === '\n') lx.emit(null, '\n');
+    }
+  }
+
+  /* ---------- Dockerfile ----------
+   * Por linha: instrução no início, argumentos até o fim. "\" no fim continua a instrução
+   * (comentários entre linhas continuadas são permitidos). Heredocs: RUN <<EOF … EOF. */
+  const DOCKER_KW = words(`FROM RUN CMD LABEL EXPOSE ENV ADD COPY ENTRYPOINT VOLUME USER WORKDIR ARG ONBUILD
+    STOPSIGNAL HEALTHCHECK SHELL MAINTAINER`);
+
+  function lexDockerArgs(lx, end, instr, heredocs) {
+    const s = lx.s;
+    while (lx.p < end) {
+      const c = s[lx.p];
+      if (isWs(c)) { lx.emit(null, lx.re(/[ \t\r]+/y)); continue; }
+      if (c === '\\' && /^\\[ \t]*\r?$/.test(s.slice(lx.p, end))) { lx.emitTo(null, end); return true; }
+      if (c === '"' || c === "'") { lexQuoted(lx, c); continue; }
+      if (c === '$') {
+        const m = lx.re(/\$(?:\{[^}\n]*\}|\w+)/y);
+        if (m) { lx.emit('meta', m); continue; }
+      }
+      if (c === '-' && s[lx.p + 1] === '-') {
+        const m = lx.re(/--[\w-]+/y);
+        if (m) { lx.emit('attr', m); continue; }
+      }
+      if (c === '<' && s[lx.p + 1] === '<') {
+        RE.heredoc.lastIndex = lx.p;
+        const m = RE.heredoc.exec(s);
+        if (m) { heredocs.push(m[2]); lx.emit('meta', m[0]); continue; }
+      }
+      if (isDigit(c) && (lx.p === 0 || /[\s=]/.test(s[lx.p - 1]))) {
+        const m = lx.re(/\d+(?:[-:]\d+)*(?:\/(?:tcp|udp))?(?=[\s"']|$)/y);
+        if (m) { lx.emit('num', m); continue; }
+      }
+      const w = lx.re(/[^\s"'$\\<]+|[\s\S]/y);
+      const kw = (instr === 'FROM' && /^as$/i.test(w)) ||
+        // instrução aninhada: ONBUILD RUN …, HEALTHCHECK … CMD …
+        ((instr === 'ONBUILD' || instr === 'HEALTHCHECK') && w === w.toUpperCase() && DOCKER_KW.has(w));
+      lx.emit(kw ? 'kw' : null, w);
+    }
+    return false;
+  }
+
+  function lexDocker(lx) {
+    const s = lx.s;
+    let cont = false, instr = '';
+    const heredocs = [];
+    while (!lx.eof()) {
+      let end = s.indexOf('\n', lx.p);
+      if (end < 0) end = lx.n;
+      if (heredocs.length) {
+        const line = s.slice(lx.p, end).replace(/\r$/, '');
+        const closes = line.replace(/^\t+/, '') === heredocs[0];
+        lx.emitTo(closes ? 'meta' : 'str', end);
+        if (closes) heredocs.shift();
+      } else {
+        const lead = lx.re(/[ \t]+/y);
+        if (lead && lx.p + lead.length <= end) lx.emit(null, lead);
+        if (s[lx.p] === '#') {
+          const directive = !cont && !instr && /^#\s*(?:syntax|escape|check)\s*=/i.test(s.slice(lx.p, end));
+          lx.emitTo(directive ? 'meta' : 'com', end);
+        } else if (lx.p < end) {
+          if (!cont) {
+            const w = lx.re(/[A-Za-z]+/y);
+            if (w) {
+              instr = w.toUpperCase();
+              lx.emit(DOCKER_KW.has(instr) ? 'kw' : null, w);
+            }
+          }
+          cont = lexDockerArgs(lx, end, instr, heredocs);
+        }
+      }
+      if (lx.p < end) lx.emitTo(null, end); // segurança
+      if (s[lx.p] === '\n') lx.emit(null, '\n');
+    }
+  }
+
   function tokenize(text, lang) {
     const lx = new Lexer(text);
     while (!lx.eof()) {
@@ -875,6 +1036,8 @@
       else if (lang === 'vue') lexHtml(lx, { vue: true });
       else if (lang === 'razor') lexHtml(lx, { razor: true });
       else if (lang === 'py') lexPython(lx);
+      else if (lang === 'yaml') lexYaml(lx);
+      else if (lang === 'docker') lexDocker(lx);
       else lexCode(lx, lang);
       if (lx.p === before) lx.emit(null, text[lx.p]); // segurança: sempre avança
     }
@@ -905,6 +1068,7 @@
     vue: 'vue',
     py: 'py', pyw: 'py', pyi: 'py',
     java: 'java',
+    yml: 'yaml', yaml: 'yaml',
     c: 'c',
     // .h pode ser C ou C++; as palavras-chave de C++ incluem as de C.
     h: 'cpp', cpp: 'cpp', cc: 'cpp', cxx: 'cpp', 'c++': 'cpp', hpp: 'cpp', hh: 'cpp', hxx: 'cpp', ino: 'cpp',
@@ -915,14 +1079,19 @@
   // Nomes exibidos na interface (dica do botão Sintaxe). Fonte única: ao adicionar uma
   // linguagem, atualize EXT e esta lista. As traduções usam {langs} e não precisam mudar.
   const LANGUAGES = ['C#', 'JavaScript/JSX', 'TypeScript/TSX', 'HTML', 'CSS/SCSS/Less', 'Razor', 'Vue',
-    'Python', 'C', 'C++', 'Java'];
+    'Python', 'C', 'C++', 'Java', 'YAML', 'Dockerfile'];
+
+  // Arquivos sem extensão reconhecidos pelo nome: Dockerfile, Dockerfile.dev, app.dockerfile, Containerfile.
+  const BY_NAME = /^(?:docker|container)file(?:\..+)?$|\.dockerfile$/;
 
   window.Highlight = {
     MAX_CHARS,
     LANGUAGES,
     langFor(path) {
-      const i = path.lastIndexOf('.');
-      return i < 0 ? null : EXT[path.slice(i + 1).toLowerCase()] || null;
+      const base = path.slice(path.lastIndexOf('/') + 1).toLowerCase();
+      if (BY_NAME.test(base)) return 'docker';
+      const i = base.lastIndexOf('.');
+      return i < 0 ? null : EXT[base.slice(i + 1)] || null;
     },
     tokenize,
     /** Tokens por linha, ou null se o texto for grande demais. */
