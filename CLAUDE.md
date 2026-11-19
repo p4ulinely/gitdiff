@@ -1,0 +1,58 @@
+# gitdiff
+
+Visualizador de diferenças git que roda no navegador e é estático. O `.git` é lido direto pelo navegador, sem servidor e sem chamar o binário `git`. Converse com o usuário em português.
+
+## Restrições do projeto
+
+- **JavaScript puro, sem dependências, sem build, sem npm.** Não adicione frameworks nem bibliotecas.
+- **Scripts clássicos, não ES modules.** A página precisa funcionar aberta via `file://`, onde `import` é bloqueado por CORS. Cada arquivo é uma IIFE que expõe um global (`GitFS`, `Git`, `Diff`, `I18n`).
+- **A ordem dos `<script>` no `index.html` importa:** `i18n.js` → `locales/*.js` → `fs.js` → `git.js` → `diff.js` → `app.js`.
+- APIs do navegador usadas: File System Access API (`showDirectoryPicker`), com `<input webkitdirectory>` como alternativa; `DecompressionStream('deflate')` para o zlib; `Intl`; IndexedDB para lembrar a última pasta; `localStorage` para preferências (chaves com prefixo `gitdiff:`).
+
+## Arquitetura
+
+| Arquivo | Papel |
+|---|---|
+| `js/fs.js` | Interface mínima de FS: `getFile(path) → File\|null` e `list(path) → [{name, kind}]`. Implementações `HandleFS` e `FileListFS`. |
+| `js/git.js` | `Repo`: objetos soltos, packfiles (idx v2, OFS/REF_DELTA), refs, packed-refs, `resolve()` (hash abreviado, refs, `~N`/`^N`), `diffTrees`, `diffCommit` (com renomeações exatas). `LogWalker`: histórico por data do committer. |
+| `js/diff.js` | Myers O(ND) com limite `maxD`. Acima dele usa o fallback *patience* (âncoras em linhas únicas + LIS). Também `buildHunks` e `intraline` (destaque de palavras). Não depende do DOM. |
+| `js/i18n.js` | `t()`, `html()`, plurais, fallback para `en`, `data-i18n*`, `I18n.missing(code)`. |
+| `js/app.js` | Toda a interface e o estado (`state`). |
+
+Pontos que não são óbvios:
+- **Fim de cada objeto no pack:** é o offset do próximo objeto, tirado dos offsets ordenados do `.idx`. O `DecompressionStream` falha se houver bytes sobrando, então o slice precisa ser exato.
+- **Ordem de leitura:** `readObject` procura nos packs antes dos objetos soltos, porque a busca no pack é em memória e a de objeto solto custa IPC de FS.
+- **Corridas assíncronas:** `state.gen` é incrementado a cada troca de commit. Todo trabalho assíncrono confere o `gen` antes de mexer no DOM.
+- **Renderização sob demanda:** os diffs são renderizados quando ficam visíveis (`IntersectionObserver`). As estatísticas (+/−) são calculadas em segundo plano por `computeAllStats`, e cada arquivo guarda seu resultado em `ch.diff` e `ch.promise`.
+- **Arquivo sem `\n` final:** a última linha recebe um sufixo `\u0000` só na chave de comparação. Assim, "sem quebra de linha no final" conta como diferença.
+
+## Convenções
+
+- **i18n é obrigatório.** Nenhum texto visível pode ficar fixo em `app.js`, `git.js` ou `index.html`.
+  - Toda chave nova entra em `js/locales/en.js` (a referência) **e** em `js/locales/pt-BR.js`.
+  - No HTML estático, use `data-i18n`, `data-i18n-html` ou `data-i18n-attr="title:chave;placeholder:chave"`.
+  - No JS, `t(chave, params)` devolve texto puro. `I18n.html(chave, params)` (`th` no `app.js`) é para traduções com marcação, e escapa os parâmetros.
+  - Erros em `git.js` usam `fail('codigo', params)`, que lança um `GitError` traduzido pela chave `errors.codigo`. Nunca use `throw new Error('texto')` ali.
+  - Texto que aparece dinamicamente também precisa ser refeito em `onLocaleChange()` no `app.js`.
+- **Escape sempre.** Todo dado vindo do repositório (mensagens, nomes, caminhos, conteúdo) passa por `esc()` antes de ir para o `innerHTML`.
+- **Estilo:** comentários em português, CSS com variáveis em `:root`, tema claro/escuro via `prefers-color-scheme`.
+- **Handlers assíncronos de evento** são envolvidos em `run(fn)`, que mostra o erro num toast.
+
+## Como testar
+
+Não há suíte de testes no repositório. A interface precisa ser testada manualmente no Chrome ou no Edge, porque o seletor de pasta é um diálogo nativo e não dá para automatizar. Já `git.js` e `diff.js` não dependem do DOM e podem ser testados no Node 22+:
+
+- carregue os arquivos com `vm.runInThisContext` após `globalThis.window = globalThis`;
+- implemente a interface de FS com `fs.openAsBlob` (devolve um `Blob` com `slice`, `stream` e `arrayBuffer`);
+- monte um repositório de teste com commits, renomeações, binários, arquivos sem EOL, merge e tag anotada; rode `git gc` para gerar packs com deltas e crie um commit solto depois;
+- compare com o git: `git rev-list --date-order`, `git diff-tree -r --no-renames --numstat` (os +/− por arquivo devem bater) e `git rev-parse` para o `resolve()`;
+- para o diff, compare a contagem de linhas iguais com uma LCS por programação dinâmica em sequências aleatórias, e force o fallback patience com `Diff.diffSeq(a, b, 3)`.
+
+Para checar a sintaxe: `node --check js/*.js js/locales/*.js`.
+
+## Limitações conhecidas
+
+- Merge é comparado só com o primeiro pai.
+- Renomeação só é detectada quando o conteúdo é idêntico.
+- Não há suporte a SHA-256, `reftable`, `objects/info/alternates` nem `.idx` v1.
+- O filtro de commits só busca nos commits já carregados (de 100 em 100), e só no título, autor, e-mail e hash.
