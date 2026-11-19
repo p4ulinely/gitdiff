@@ -502,7 +502,12 @@
           oldTree = null; // clone raso: pai ausente
         }
       }
-      const changes = await this.diffTrees(oldTree, commit.tree);
+      return this.diffTreesWithRenames(oldTree, commit.tree);
+    }
+
+    // Diferença entre duas árvores (qualquer uma pode ser null), com renomeações exatas, ordenada por caminho.
+    async diffTreesWithRenames(oldTree, newTree) {
+      const changes = await this.diffTrees(oldTree, newTree);
       // Renomeações exatas (mesmo conteúdo, caminho diferente).
       const deleted = new Map();
       for (const c of changes) if (c.status === 'D' && c.oldMode !== '160000' && !deleted.has(c.oldSha)) deleted.set(c.oldSha, c);
@@ -518,7 +523,180 @@
         c.oldSha = d.oldSha;
         c.oldMode = d.oldMode;
       }
-      return changes.filter((c) => !removed.has(c)).sort((x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : 0));
+      const result = await this.detectSimilarRenames(changes.filter((c) => !removed.has(c)));
+      return result.sort((x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : 0));
+    }
+
+    /* Renomeações com alteração de conteúdo, como o git (limiar padrão de 50%).
+     * Pontuação de um par removido→adicionado = bytes de linhas em comum / tamanho do maior.
+     * Os pares são atribuídos do mais parecido para o menos.
+     *
+     * Custo: cada linha vira um inteiro uma única vez e cada arquivo vira um vetor ordenado,
+     * então um par é só a intersecção de dois vetores de inteiros. Mesmo assim, como no
+     * diff.renameLimit do git, há limites: até RENAME_PAIRS pares e um orçamento de trabalho
+     * (WORK_BUDGET elementos comparados). Acima disso ficam só as renomeações exatas.
+     * Binários, vazios e arquivos acima de 1 MB são ignorados. */
+    async detectSimilarRenames(changes, threshold = 0.5) {
+      const RENAME_PAIRS = 2500, MAX = 1024 * 1024, WORK_BUDGET = 15e6;
+      const dels = changes.filter((c) => c.status === 'D' && c.oldMode !== '160000');
+      const adds = changes.filter((c) => c.status === 'A' && c.newMode !== '160000');
+      if (!dels.length || !adds.length || dels.length * adds.length > RENAME_PAIRS) return changes;
+
+      // 1) bytes e número de linhas (contar '\n' nos bytes é barato; decodificar não é)
+      const read = async (sha) => {
+        let b;
+        try {
+          b = await this.readBlob(sha);
+        } catch {
+          return null;
+        }
+        if (!b.length || b.length > MAX || b.subarray(0, 8000).includes(0)) return null;
+        let lines = 1;
+        for (let k = 0; k < b.length; k++) if (b[k] === 10) lines++;
+        return { size: b.length, bytes: b, lines };
+      };
+      const [D, N] = await Promise.all([Promise.all(dels.map((c) => read(c.oldSha))), Promise.all(adds.map((c) => read(c.newSha)))]);
+
+      // 2) pares que podem chegar ao limiar (tamanhos compatíveis) e o trabalho estimado
+      const cand = [];
+      let work = 0;
+      for (let i = 0; i < dels.length; i++) {
+        if (!D[i]) continue;
+        for (let j = 0; j < adds.length; j++) {
+          if (!N[j]) continue;
+          if (Math.min(D[i].size, N[j].size) / Math.max(D[i].size, N[j].size) < threshold) continue;
+          cand.push(i, j);
+          work += D[i].lines + N[j].lines;
+        }
+      }
+      if (!cand.length || work > WORK_BUDGET) return changes; // acima do orçamento: só renomeações exatas
+
+      // 3) só agora decodifica: cada linha vira um inteiro, cada arquivo um vetor ordenado
+      const ids = new Map(), idLen = [];
+      const vectorize = (f) => {
+        if (!f || f.v) return;
+        const lines = td.decode(f.bytes).split('\n');
+        const v = new Int32Array(lines.length);
+        for (let k = 0; k < lines.length; k++) {
+          let id = ids.get(lines[k]);
+          if (id === undefined) {
+            id = ids.size;
+            ids.set(lines[k], id);
+            idLen.push(lines[k].length + 1);
+          }
+          v[k] = id;
+        }
+        f.v = v.sort();
+        f.bytes = null;
+      };
+      for (let c = 0; c < cand.length; c += 2) {
+        vectorize(D[cand[c]]);
+        vectorize(N[cand[c + 1]]);
+      }
+
+      const pairs = [];
+      for (let c = 0; c < cand.length; c += 2) {
+        const i = cand[c], j = cand[c + 1];
+        const a = D[i].v, b = N[j].v;
+        let x = 0, y = 0, same = 0;
+        while (x < a.length && y < b.length) { // intersecção de multiconjuntos ordenados
+          if (a[x] === b[y]) { same += idLen[a[x]]; x++; y++; }
+          else if (a[x] < b[y]) x++;
+          else y++;
+        }
+        const score = Math.min(1, same / Math.max(D[i].size, N[j].size));
+        if (score >= threshold) pairs.push({ i, j, score });
+      }
+      if (!pairs.length) return changes;
+      pairs.sort((x, y) => y.score - x.score);
+      const usedD = new Set(), usedA = new Set();
+      for (const { i, j, score } of pairs) {
+        if (usedD.has(i) || usedA.has(j)) continue;
+        usedD.add(i);
+        usedA.add(j);
+        const a = adds[j], d = dels[i];
+        a.status = 'R';
+        a.oldPath = d.path;
+        a.oldSha = d.oldSha;
+        a.oldMode = d.oldMode;
+        a.similarity = Math.floor(score * 100);
+      }
+      const gone = new Set([...usedD].map((i) => dels[i]));
+      return changes.filter((c) => !gone.has(c));
+    }
+
+    // Alvo de uma ref simbólica (ex.: refs/remotes/origin/HEAD → refs/remotes/origin/main), ou null.
+    async readSymbolicRef(name) {
+      const t = ((await this.readText(name)) || '').trim();
+      return t.startsWith('ref: ') ? t.slice(5).trim() : null;
+    }
+
+    /* Compara duas pontas como "git log base..head" / "head..base" + "git merge-base".
+     *
+     * Percorre os dois históricos ao mesmo tempo, do commit mais recente para o mais antigo,
+     * marcando cada commit com quem o alcança (A = base, B = head). Um commit marcado pelos
+     * dois é comum; o primeiro comum ainda não "coberto" por outro comum é o ancestral comum
+     * (como o paint_down_to_common do git). Para quando só restam comuns já cobertos.
+     *
+     * Retorna { ahead: [commits só do head], behind: [commits só da base], mergeBase, mergeBases, truncated }. */
+    async compareTips(baseSha, headSha, limit = 20000) {
+      const A = 1, B = 2, BOTH = 3, STALE = 4;
+      const flags = new Map(), queued = new Set(), queue = [], visited = [];
+      const mergeBases = [];
+      const insert = (c) => {
+        const t = c.committer.time;
+        let lo = 0, hi = queue.length;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (queue[mid].committer.time >= t) lo = mid + 1;
+          else hi = mid;
+        }
+        queue.splice(lo, 0, c);
+      };
+      const mark = async (sha, f) => {
+        const old = flags.get(sha) || 0;
+        if ((old | f) === old) return;
+        flags.set(sha, old | f);
+        if (queued.has(sha)) return; // já na fila: as marcas novas valem quando sair
+        let c;
+        try {
+          c = await this.readCommit(sha);
+        } catch {
+          return; // clone raso: pai ausente
+        }
+        if (queued.has(sha)) return;
+        queued.add(sha);
+        insert(c); // também reinsere um commit já visitado que ganhou marca nova (relógios fora de ordem)
+      };
+      const done = () => queue.every((c) => (flags.get(c.sha) & (BOTH | STALE)) === (BOTH | STALE));
+
+      await Promise.all([mark(baseSha, A), mark(headSha, B)]);
+      let steps = 0, truncated = false;
+      while (queue.length && !done()) {
+        if (++steps > limit) { truncated = true; break; }
+        const c = queue.shift();
+        queued.delete(c.sha);
+        let f = flags.get(c.sha);
+        if ((f & BOTH) === BOTH && !(f & STALE)) {
+          mergeBases.push(c.sha);
+          f |= STALE; // ancestrais de um ancestral comum não são "melhores"
+          flags.set(c.sha, f);
+        }
+        visited.push(c);
+        const pf = (f & BOTH) === BOTH ? f | STALE : f;
+        await Promise.all(c.parents.map((p) => mark(p, pf)));
+      }
+
+      // Classifica pelas marcas finais (um commit pode ter ganho a outra marca depois de visitado).
+      const seen = new Set(), ahead = [], behind = [];
+      for (const c of visited) {
+        if (seen.has(c.sha)) continue;
+        seen.add(c.sha);
+        const f = flags.get(c.sha) & BOTH;
+        if (f === B) ahead.push(c);
+        else if (f === A) behind.push(c);
+      }
+      return { ahead, behind, mergeBase: mergeBases[0] || null, mergeBases, truncated };
     }
   }
 

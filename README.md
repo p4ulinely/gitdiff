@@ -16,6 +16,10 @@ Nada é enviado para fora: o `.git` é lido localmente pelo navegador.
 - Leitura nativa do `.git`: objetos soltos, packfiles (com deltas), refs, `packed-refs` e tags anotadas
 - Painéis de commits e de arquivos alterados, ambos recolhíveis e redimensionáveis
 - Arquivos alterados em lista ou em árvore de pastas, com filtro e contagem de +/−
+- **Modo Comparar** (prévia de pull request): escolha a base e a branch para ver:
+  - os commits que entrariam no PR e quantos commits a branch está atrás da base;
+  - as alterações a partir do ancestral comum (como o GitHub/GitLab mostram);
+  - **os conflitos prováveis** com a base, com as linhas indicadas.
 - Diff unificado ou lado a lado, com destaque das palavras alteradas
 - Realce de sintaxe pela extensão do arquivo, ligado por padrão (botão **Sintaxe**): C# (`.cs`), JavaScript/JSX, TypeScript/TSX, HTML, CSS/SCSS/Less, Razor (`.cshtml`), Vue, Python, C, C++, Java, YAML e Dockerfile (detectado pelo nome: `Dockerfile`, `Dockerfile.dev`, `*.dockerfile`, `Containerfile`)
 - Detecção de renomeações exatas, de arquivos binários e de submódulos, com prévia de imagens antes/depois
@@ -59,6 +63,7 @@ js/locales/  um arquivo por idioma (en.js é a referência)
 js/fs.js     acesso a arquivos (File System Access API / webkitdirectory)
 js/git.js    leitura do repositório: objetos, packs, refs, histórico, diff de árvores
 js/diff.js   diff de linhas (Myers + fallback patience), hunks, destaque intralinha
+js/compare.js  previsão de conflitos de um PR (merge de 3 vias aproximado)
 js/highlight.js  realce de sintaxe (lista de linguagens em Highlight.LANGUAGES)
 js/app.js    interface
 ```

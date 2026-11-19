@@ -5,8 +5,8 @@ Visualizador de diferenças git que roda no navegador e é estático. O `.git` �
 ## Restrições do projeto
 
 - **JavaScript puro, sem dependências, sem build, sem npm.** Não adicione frameworks nem bibliotecas.
-- **Scripts clássicos, não ES modules.** A página precisa funcionar aberta via `file://`, onde `import` é bloqueado por CORS. Cada arquivo é uma IIFE que expõe um global (`GitFS`, `Git`, `Diff`, `I18n`).
-- **A ordem dos `<script>` no `index.html` importa:** `i18n.js` → `locales/*.js` → `fs.js` → `git.js` → `diff.js` → `highlight.js` → `app.js`.
+- **Scripts clássicos, não ES modules.** A página precisa funcionar aberta via `file://`, onde `import` é bloqueado por CORS. Cada arquivo é uma IIFE que expõe um global (`GitFS`, `Git`, `Diff`, `Compare`, `Highlight`, `I18n`).
+- **A ordem dos `<script>` no `index.html` importa:** `i18n.js` → `locales/*.js` → `fs.js` → `git.js` → `diff.js` → `compare.js` → `highlight.js` → `app.js`.
 - APIs do navegador usadas: File System Access API (`showDirectoryPicker`), com `<input webkitdirectory>` como alternativa; `DecompressionStream('deflate')` para o zlib; `Intl`; IndexedDB para lembrar a última pasta; `localStorage` para preferências (chaves com prefixo `gitdiff:`).
 
 ## Arquitetura
@@ -14,7 +14,8 @@ Visualizador de diferenças git que roda no navegador e é estático. O `.git` �
 | Arquivo | Papel |
 |---|---|
 | `js/fs.js` | Interface mínima de FS: `getFile(path) → File\|null` e `list(path) → [{name, kind}]`. Implementações `HandleFS` e `FileListFS`. |
-| `js/git.js` | `Repo`: objetos soltos, packfiles (idx v2, OFS/REF_DELTA), refs, packed-refs, `resolve()` (hash abreviado, refs, `~N`/`^N`), `diffTrees`, `diffCommit` (com renomeações exatas). `LogWalker`: histórico por data do committer. |
+| `js/git.js` | `Repo`: objetos soltos, packfiles (idx v2, OFS/REF_DELTA), refs, packed-refs, `resolve()` (hash abreviado, refs, `~N`/`^N`), `diffTrees`, `diffTreesWithRenames`/`diffCommit` (renomeações exatas + por similaridade ≥ 50%, como o git), `compareTips` (ahead/behind + merge-base). `LogWalker`: histórico por data do committer. |
+| `js/compare.js` | Previsão de conflitos de um PR (`Compare.analyze`). Não depende do DOM. |
 | `js/diff.js` | Myers O(ND) com limite `maxD`. Acima dele usa o fallback *patience* (âncoras em linhas únicas + LIS). Também `buildHunks` e `intraline`, que devolve intervalos `[início, fim)` das palavras alteradas. Não depende do DOM. |
 | `js/highlight.js` | Realce de sintaxe próprio (lexers à mão com regex sticky). A lista de linguagens é `LANGUAGES` (C# é a principal); não a repita aqui. JS/JSX, TS/TSX, C#, C, C++ e Java compartilham o `lexCode`, com ramos por linguagem. HTML/Razor/Vue usam o `lexHtml`, e CSS/SCSS/Less o `lexCss`. Python, YAML e Dockerfile têm lexers próprios (`lexPython`, `lexYaml`, `lexDocker`); YAML e Dockerfile são orientados a linha. Arquivos sem extensão (Dockerfile) são reconhecidos pelo nome em `BY_NAME`, que é checado antes de `EXT` em `langFor`. O mapeamento de extensões fica em `EXT`, e `.h` é tratado como C++ (as palavras-chave de C++ incluem as de C). `Highlight.lines(texto, lang)` devolve tokens `[classe, texto]` por linha. Não depende do DOM. |
 | `js/i18n.js` | `t()`, `html()`, plurais, fallback para `en`, `data-i18n*`, `I18n.missing(code)`. |
@@ -29,6 +30,12 @@ Pontos que não são óbvios:
   - Os arquivos recolhidos ficam em `state.collapsed`, e não só no DOM.
   - `renderFileBody` pode ser chamada várias vezes para o mesmo arquivo (observer, âncora, religar a sintaxe). Só a chamada mais recente escreve no DOM (`body.renderSeq`).
 - **Renderização sob demanda:** os diffs são renderizados quando ficam visíveis (`IntersectionObserver`). As estatísticas (+/−) são calculadas em segundo plano por `computeAllStats`, e cada arquivo guarda seu resultado em `ch.diff` e `ch.promise`.
+- **Modo Comparar (pull request):** `state.appMode` é `'commit'` ou `'compare'`. `state.subject` diz o que o painel mostra (`'commit'` com `state.current`, ou `'compare'` com `state.compare`). `showChanges()` é o caminho único para exibir uma lista de alterações, e `renderHeader()` escolhe o cabeçalho.
+  - **Semântica de PR (3 pontos):** o diff vai do **ancestral comum** até o compare, não de ponta a ponta. Os commits listados são `git log base..compare`. Sem ancestral comum, mostra a diferença direta, com aviso.
+  - **`compareTips`:** percorre os dois históricos juntos por data, com marcas A/B/STALE, como o `paint_down_to_common` do git. Commits que ganham marca nova depois de visitados são reinseridos, para tolerar relógios fora de ordem. Há um limite de passos (`truncated`).
+  - **Conflitos (`compare.js`):** cada arquivo alterado nos dois lados vira regiões de linhas em coordenadas do ancestral, e o conflito existe quando as regiões se sobrepõem ou se encostam, salvo alteração idêntica. Também são detectados modificado×removido, adicionado nos dois lados, binário e renomeado diferente. O resultado fica em `ch.conflict` e é calculado em segundo plano, depois da exibição (`analyzeConflicts` → `updateConflictUI`).
+  - **Validação:** a previsão foi validada contra `git merge-tree --write-tree` (merge real, sem alterar o repositório), com 100% de acerto em 600 arquivos com edições aleatórias. **Qualquer mudança em `compare.js`, `compareTips` ou na detecção de renomeações deve repetir esse teste.** Erros já cometidos: tratar renomeação de um lado só como conflito, e não detectar renomeação com edição.
+  - **Base padrão:** `origin/HEAD` → `main`/`master`/`develop`. O compare padrão é a branch atual. As escolhas ficam em `localStorage` (`cmp:base`/`cmp:head`).
 - **Arquivo sem `\n` final:** a última linha recebe um sufixo `\u0000` só na chave de comparação. Assim, "sem quebra de linha no final" conta como diferença.
 - **Realce de sintaxe:**
   - **Arquivo inteiro:** os lados antigo e novo são tokenizados inteiros, nunca por hunk, para que comentários e strings de várias linhas e blocos Razor saiam certos. Isso é feito em `ensureTokens(ch)` no `renderFileBody` (o único caminho de renderização do corpo), só para arquivos exibidos com realce. O resultado fica em `ch.diff.tokA`/`tokB`. **Não guarde o texto dos arquivos no diff:** as estatísticas são calculadas para todos os arquivos do commit, e guardar o texto multiplicaria a memória. Os blobs são relidos do cache do repositório.
@@ -133,6 +140,7 @@ Não há suíte de testes no repositório.
 - implemente a interface de FS com `fs.openAsBlob` (devolve um `Blob` com `slice`, `stream` e `arrayBuffer`);
 - monte um repositório de teste com commits, renomeações, binários, arquivos sem EOL, merge e tag anotada; rode `git gc` para gerar packs com deltas e crie um commit solto depois;
 - compare com o git: `git rev-list --date-order`, `git diff-tree -r --no-renames --numstat` (os +/− por arquivo devem bater) e `git rev-parse` para o `resolve()`;
+- para a comparação de branches: `compareTips` contra `git rev-list base..head`, `git rev-list head..base` e `git merge-base` (inclua ramos derivados e branch contra ela mesma). Para a previsão de conflitos, compare com os arquivos que `git merge-tree --write-tree --name-only base head` lista em conflito, em cenários feitos à mão (conteúdo sobreposto, adição no fim, binário, adição nos dois lados, modificado×removido, renomeação com edição) **e** num fuzzing com edições aleatórias nos dois lados;
 - para o diff, compare a contagem de linhas iguais com uma LCS por programação dinâmica em sequências aleatórias, e force o fallback patience com `Diff.diffSeq(a, b, 3)`;
 - para o highlighter, faça fuzzing com fragmentos problemáticos (`@{`, `"""`, `${`, `</script>`, `@*`…) em todas as linguagens. Confira que a concatenação dos tokens é igual à entrada e que o número de linhas bate, e inspecione amostras reais de C# e Razor imprimindo `[classe:texto]`.
 
@@ -143,6 +151,9 @@ Para checar a sintaxe: `node --check js/*.js js/locales/*.js`.
 ## Limitações conhecidas
 
 - Merge é comparado só com o primeiro pai.
-- Renomeação só é detectada quando o conteúdo é idêntico.
+- A detecção de renomeação por similaridade roda em **todo** commit (`diffCommit`), então o custo dela entra direto no tempo de abrir um commit.
+  - Limites: até 2500 pares removido×adicionado e um orçamento de ~15 milhões de linhas comparadas (estimado contando `\n` nos bytes, **antes** de decodificar). Binários e arquivos acima de 1 MB são ignorados. Acima disso, só renomeações exatas.
+  - Medido: pior caso dentro do orçamento ≈ 200 ms (50×50 arquivos de 3.000 linhas); acima dele, < 100 ms. **Ao mexer nessa função, refaça essa medição.** A primeira versão, sem o orçamento e com `Map` por par, levava 7,6 s.
+- A previsão de conflitos é por arquivo e por região de linhas, e não aplica as estratégias de merge do git (ex.: `ours`/`theirs`, rerere). Com vários ancestrais comuns (merges cruzados), usa o mais recente.
 - Não há suporte a SHA-256, `reftable`, `objects/info/alternates` nem `.idx` v1.
 - O filtro de commits só busca nos commits já carregados (de 100 em 100), e só no título, autor, e-mail e hash.

@@ -8,6 +8,8 @@
     repoInfo: $('repoInfo'), repoName: $('repoName'), reloadBtn: $('reloadBtn'),
     branch: $('branchSelect'), hashForm: $('hashForm'), hashInput: $('hashInput'), hashBtn: $('hashBtn'),
     status: $('status'), viewToggle: $('viewToggle'), hlToggle: $('hlToggle'), localeSelect: $('localeSelect'),
+    appModeToggle: $('appModeToggle'), commitControls: $('commitControls'), compareControls: $('compareControls'),
+    baseSelect: $('baseSelect'), headSelect: $('headSelect'), swapBtn: $('swapBtn'),
     commitCount: $('commitCount'), commitFilter: $('commitFilter'), commitScroll: $('commitScroll'),
     commitList: $('commitList'), loadMore: $('loadMore'),
     fileCount: $('fileCount'), fileFilter: $('fileFilter'), fileModeToggle: $('fileModeToggle'), fileList: $('fileList'),
@@ -45,6 +47,9 @@
     gen: 0,
     view: LS.get('view', 'unified'),
     highlight: LS.get('highlight', true),
+    appMode: LS.get('appMode', 'commit'), // 'commit' | 'compare'
+    subject: null, // o que o painel mostra: 'commit' (state.current) | 'compare' (state.compare)
+    compare: null, // resultado do modo Comparar (loadCompare)
     fileMode: LS.get('fileMode', 'list'),
     observer: null,
     loadingMore: false,
@@ -192,10 +197,10 @@
 
   const REF_GROUPS = [['branches.local', 'refs/heads/'], ['branches.remote', 'refs/remotes/'], ['branches.tags', 'refs/tags/'], ['branches.other', 'refs/']];
 
+  // Preenche os seletores de ref (branch do modo Commit, base e compare), mantendo as escolhas.
   function renderBranchOptions() {
     const { refs, head } = state;
     if (!head) return;
-    const keep = el.branch.value;
     const buckets = REF_GROUPS.map(() => []);
     for (const name of [...refs.keys()].sort((a, b) => a.localeCompare(b))) {
       const g = REF_GROUPS.findIndex(([, p]) => name.startsWith(p));
@@ -209,9 +214,40 @@
         buckets[g].map(([v, name]) => `<option value="${esc(v)}">${esc(name)}${v === head.ref ? ' ●' : ''}</option>`).join('') +
         '</optgroup>';
     });
-    el.branch.innerHTML = h;
-    el.branch.disabled = !h;
-    if (keep) el.branch.value = keep;
+    for (const sel of [el.branch, el.baseSelect, el.headSelect]) {
+      const keep = sel.value;
+      sel.innerHTML = h;
+      sel.disabled = !h;
+      if (keep) sel.value = keep;
+    }
+    el.swapBtn.disabled = !h;
+  }
+
+  // Nome curto de uma ref para exibição: refs/heads/main → main, refs/remotes/origin/x → origin/x.
+  function refLabel(ref) {
+    const g = REF_GROUPS.find(([, p]) => ref.startsWith(p));
+    return g ? ref.slice(g[1].length) : ref;
+  }
+
+  /* Base e compare iniciais: a última escolha (se ainda existir); senão a base é a branch padrão
+   * do remoto (origin/HEAD) ou main/master/develop, e o compare é a branch atual. */
+  async function chooseCompareDefaults() {
+    const { refs, head } = state;
+    const has = (v) => !!v && (v === 'HEAD' ? !!head.sha : refs.has(v));
+    let base = LS.get('cmp:base', null), cmp = LS.get('cmp:head', null);
+    if (!has(base)) {
+      const originHead = await state.repo.readSymbolicRef('refs/remotes/origin/HEAD');
+      const candidates = [];
+      if (originHead) candidates.push('refs/heads/' + originHead.replace(/^refs\/remotes\/origin\//, ''), originHead);
+      candidates.push('refs/heads/main', 'refs/heads/master', 'refs/heads/develop', 'refs/remotes/origin/main', 'refs/remotes/origin/master');
+      base = candidates.find(has) || (el.baseSelect.options[0] && el.baseSelect.options[0].value);
+    }
+    if (!has(cmp) || cmp === base) {
+      cmp = has(head.ref) && head.ref !== base ? head.ref
+        : [...refs.keys()].find((r) => r.startsWith('refs/heads/') && r !== base) || base;
+    }
+    el.baseSelect.value = base;
+    el.headSelect.value = cmp;
   }
 
   async function loadRefs(preferred, keepCommit) {
@@ -229,7 +265,9 @@
     }
     const has = (v) => v && (v === 'HEAD' ? !!head.sha : refs.has(v));
     el.branch.value = has(preferred) ? preferred : has(head.ref) ? head.ref : el.branch.options[0].value;
-    await loadBranch(keepCommit);
+    await chooseCompareDefaults();
+    if (state.appMode === 'compare') await loadCompare();
+    else await loadBranch(keepCommit);
   }
 
   function refSha(value) {
@@ -289,7 +327,23 @@
     el.commitList.appendChild(frag);
   }
 
+  // Modo Comparar: "Todas as alterações" no topo, seguido dos commits que o PR traria.
+  function renderCompareCommitList() {
+    const top = el.commitScroll.scrollTop;
+    const n = state.commits.length;
+    el.commitList.innerHTML =
+      `<li class="commit commit-all${state.subject === 'compare' ? ' active' : ''}" data-all="1">` +
+      `<div class="c-subject">${esc(t('compare.all'))}</div>` +
+      `<div class="c-meta"><span>${esc(t('compare.commits', { count: n }))}</span></div></li>` +
+      (n ? '' : `<li class="list-empty">${esc(t('compare.noCommits'))}</li>`);
+    appendCommits(state.commits);
+    el.commitCount.textContent = n ? String(n) : '';
+    el.loadMore.hidden = true;
+    el.commitScroll.scrollTop = top;
+  }
+
   function rerenderCommitList() {
+    if (state.appMode === 'compare' && state.compare) return renderCompareCommitList();
     if (!state.commits.length) {
       if (state.head && !el.branch.options.length) el.commitList.innerHTML = `<li class="list-empty">${esc(t('commits.none'))}</li>`;
       return;
@@ -307,9 +361,10 @@
     }
   }
 
+  // sha null = item "Todas as alterações" do modo Comparar.
   function markActiveCommit(sha) {
     for (const li of el.commitList.querySelectorAll('.commit.active')) li.classList.remove('active');
-    const li = el.commitList.querySelector(`.commit[data-sha="${sha}"]`);
+    const li = el.commitList.querySelector(sha ? `.commit[data-sha="${sha}"]` : '.commit[data-all]');
     if (li) {
       li.classList.add('active');
       li.scrollIntoView({ block: 'nearest' });
@@ -328,17 +383,180 @@
       const changes = await state.repo.diffCommit(commit);
       if (gen !== state.gen) return;
       state.current = commit;
-      state.changes = changes;
-      state.activeFile = -1;
-      state.collapsed = new Set();
-      renderCommitHeader(commit);
-      renderFiles();
-      renderDiffs();
-      el.diffPane.scrollTop = 0;
-      computeAllStats(gen);
+      showChanges('commit', changes, gen);
     } finally {
       if (gen === state.gen) busy(null);
     }
+  }
+
+  // Mostra uma lista de alterações no painel (de um commit ou de uma comparação).
+  function showChanges(subject, changes, gen) {
+    state.subject = subject;
+    state.changes = changes;
+    state.activeFile = -1;
+    state.collapsed = new Set();
+    renderHeader();
+    renderFiles();
+    renderDiffs();
+    el.diffPane.scrollTop = 0;
+    computeAllStats(gen);
+  }
+
+  function renderHeader() {
+    if (state.subject === 'compare') renderCompareHeader();
+    else if (state.subject === 'commit') renderCommitHeader(state.current);
+  }
+
+  /* ---------- modo Comparar (pull request) ---------- */
+
+  /* Compara base ← compare como um PR: commits só do compare, alterações do ancestral comum
+   * até o compare (diff de 3 pontos) e, em segundo plano, a previsão de conflitos com a base. */
+  async function loadCompare() {
+    const repo = state.repo;
+    const baseRef = el.baseSelect.value, headRef = el.headSelect.value;
+    if (!repo || !baseRef || !headRef) return;
+    LS.set('cmp:base', baseRef);
+    LS.set('cmp:head', headRef);
+    const gen = ++state.gen;
+    busy('status.comparing');
+    try {
+      const [baseSha, headSha] = await Promise.all([repo.peelToCommit(refSha(baseRef)), repo.peelToCommit(refSha(headRef))]);
+      const res = await repo.compareTips(baseSha, headSha);
+      const [baseC, headC] = await Promise.all([repo.readCommit(baseSha), repo.readCommit(headSha)]);
+      const mb = res.mergeBase ? await repo.readCommit(res.mergeBase) : null;
+      // Sem ancestral comum (históricos independentes): diferença direta entre as pontas.
+      const changes = await repo.diffTreesWithRenames(mb ? mb.tree : baseC.tree, headC.tree);
+      if (gen !== state.gen) return;
+      const cmp = (state.compare = { baseRef, headRef, baseSha, headSha, res, mb, baseC, headC, changes, analysis: null, error: null });
+      state.walker = null;
+      state.current = null;
+      state.commits = res.ahead;
+      state.subject = 'compare';
+      renderCompareCommitList();
+      busy(null);
+      showCompareAll();
+      analyzeConflicts(cmp);
+    } finally {
+      if (gen === state.gen) busy(null);
+    }
+  }
+
+  // Volta para a visão "Todas as alterações" da comparação atual.
+  function showCompareAll() {
+    if (!state.compare) return;
+    const gen = ++state.gen;
+    state.current = null;
+    markActiveCommit(null);
+    showChanges('compare', state.compare.changes, gen);
+  }
+
+  async function analyzeConflicts(cmp) {
+    const { res, mb, baseC, changes } = cmp;
+    // Só faz sentido com ancestral comum e com o que levar para a base.
+    if (!mb || !res.ahead.length || cmp.baseSha === cmp.headSha) return;
+    try {
+      cmp.analysis = await Compare.analyze(state.repo, mb.tree, baseC.tree, changes);
+    } catch (e) {
+      console.error(e);
+      cmp.error = errorMessage(e);
+    }
+    if (state.compare === cmp && state.subject === 'compare') updateConflictUI();
+  }
+
+  function rangesText(c) {
+    if (!c.ranges || !c.ranges.length) return '';
+    return c.ranges.map((r) => (r.start === r.end ? t('compare.line', { n: r.start }) : t('compare.lines', r))).join(', ');
+  }
+
+  function conflictLabel(c) {
+    const kind = t('compare.kind.' + (c.large ? 'large' : c.kind));
+    const lines = rangesText(c);
+    return lines ? `${kind} (${lines})` : kind;
+  }
+
+  function conflictStatusHTML() {
+    const cmp = state.compare;
+    const { res, mb } = cmp;
+    if (!mb || !res.ahead.length || cmp.baseSha === cmp.headSha) return '';
+    if (cmp.error) return `<div class="cmp-box error">${esc(t('compare.analysisFailed', { message: cmp.error }))}</div>`;
+    if (!cmp.analysis) return `<div class="cmp-box info"><span class="spinner"></span>${esc(t('compare.analyzing'))}</div>`;
+    const { conflicts, clean } = cmp.analysis;
+    const cleanNote = clean ? `<p class="muted">${esc(t('compare.clean', { count: clean }))}</p>` : '';
+    if (!conflicts) return `<div class="cmp-box ok"><strong>✓ ${esc(t('compare.noConflicts'))}</strong>${cleanNote}</div>`;
+    const items = state.changes
+      .map((ch, i) => [ch, i])
+      .filter(([ch]) => ch.conflict && ch.conflict.conflict)
+      .map(([ch, i]) => `<li><a href="#" data-file="${i}">${esc(ch.path)}</a> — ${esc(conflictLabel(ch.conflict))}</li>`)
+      .join('');
+    return `<div class="cmp-box warn"><strong>⚠ ${esc(t('compare.conflicts', { count: conflicts }))}</strong>` +
+      `<ul>${items}</ul>${cleanNote}<p class="muted">${esc(t('compare.estimate'))}</p></div>`;
+  }
+
+  function renderCompareHeader() {
+    const cmp = state.compare;
+    const { res, mb } = cmp;
+    const base = refLabel(cmp.baseRef), head = refLabel(cmp.headRef);
+    const ahead = res.ahead.length, behind = res.behind.length;
+    const authors = new Set(res.ahead.map((c) => c.author.email || c.author.name)).size;
+    const notices = [];
+    if (cmp.baseSha === cmp.headSha) notices.push(t('compare.same'));
+    else if (!ahead && !res.truncated) notices.push(t('compare.nothing', { base, head }));
+    if (!mb && !res.truncated && cmp.baseSha !== cmp.headSha) notices.push(t('compare.unrelated'));
+    if (res.truncated) notices.push(t('compare.truncated'));
+    if (mb && ahead && behind) notices.push(t('compare.behindNote', { count: behind, base, head }));
+    el.commitHeader.hidden = false;
+    el.commitHeader.innerHTML = `
+      <div class="ch-subject cmp-title">${th('compare.title', { base, head })}</div>
+      <div class="ch-meta">
+        <span>${esc(t('compare.ahead', { count: ahead }))}</span>
+        <span class="${behind ? 'cmp-behind' : ''}">${esc(t('compare.behind', { count: behind }))}</span>
+        ${authors ? `<span>${esc(t('compare.authors', { count: authors }))}</span>` : ''}
+        ${mb ? `<span>${esc(t('compare.mergeBase'))}: <a href="#" data-goto="${mb.sha}" title="${mb.sha}">${short(mb.sha)}</a></span>` : ''}
+        <span class="ch-stats" id="commitStats"></span>
+      </div>
+      ${notices.map((n) => `<p class="cmp-notice">${esc(n)}</p>`).join('')}
+      <div id="cmpStatus">${conflictStatusHTML()}</div>`;
+    updateTotals();
+  }
+
+  const conflictBadgeHTML = (ch) => (ch.conflict && ch.conflict.conflict
+    ? `<span class="cmp-badge" title="${esc(conflictLabel(ch.conflict))}">⚠ ${esc(t('compare.badge'))}</span>` : '');
+
+  // Linhas do compare dentro de um trecho de conflito ganham uma marca na margem.
+  function markConflictRows(body, ch) {
+    const ranges = ch.conflict && ch.conflict.conflict && ch.conflict.ranges;
+    if (!ranges || !ranges.length) return;
+    for (const tr of body.querySelectorAll('tr[data-n]')) {
+      const n = +tr.dataset.n;
+      if (n && ranges.some((r) => n >= r.start && n <= r.end)) tr.classList.add('conflict');
+    }
+  }
+
+  // Resultado da análise chegou: atualiza o resumo, a lateral e os cabeçalhos/linhas já exibidos.
+  function updateConflictUI() {
+    const status = document.getElementById('cmpStatus');
+    if (status) status.innerHTML = conflictStatusHTML();
+    renderFiles();
+    state.changes.forEach((ch, i) => {
+      const s = el.diffs.querySelector(`.file[data-index="${i}"]`);
+      if (!s) return;
+      const slot = s.querySelector('.fh-conflict');
+      if (slot) slot.innerHTML = conflictBadgeHTML(ch);
+      const body = s.querySelector('.file-body:not(.placeholder)');
+      if (body) markConflictRows(body, ch);
+    });
+  }
+
+  function setAppMode(mode, load = true) {
+    state.appMode = mode;
+    LS.set('appMode', mode);
+    for (const b of el.appModeToggle.querySelectorAll('button')) b.classList.toggle('on', b.dataset.appmode === mode);
+    el.commitControls.hidden = mode !== 'commit';
+    el.compareControls.hidden = mode !== 'compare';
+    if (!load || !state.repo || !el.branch.options.length) return;
+    if (mode === 'compare') return loadCompare();
+    state.compare = null;
+    return loadBranch();
   }
 
   function renderCommitHeader(c) {
@@ -476,11 +694,18 @@
 
   /* ---------- lista de arquivos (lateral) ---------- */
 
+  // "Renomeado (87% semelhante)" para renomeações com alteração de conteúdo.
+  const statusTitle = (ch) => statusLabel(ch.status) +
+    (ch.similarity !== undefined && ch.similarity < 100 ? ` (${t('files.similarity', { pct: ch.similarity })})` : '');
+
   function fileItemHTML(ch, i, name, dir, depth) {
-    const title = (ch.oldPath ? ch.oldPath + ' → ' : '') + ch.path + ' (' + statusLabel(ch.status) + ')';
+    const conflict = ch.conflict && ch.conflict.conflict;
+    const title = (ch.oldPath ? ch.oldPath + ' → ' : '') + ch.path + ' (' + statusTitle(ch) + ')' +
+      (conflict ? '\n⚠ ' + conflictLabel(ch.conflict) : '');
     return `<li class="file-item${i === state.activeFile ? ' active' : ''}" data-index="${i}" style="--depth:${depth}" title="${esc(title)}">` +
       `<span class="badge s-${ch.status}">${ch.status}</span>` +
       `<span class="fi-text">${esc(name)}${dir ? `<span class="fi-dir">${esc(dir)}</span>` : ''}</span>` +
+      (conflict ? '<span class="fi-conflict">⚠</span>' : '') +
       `<span class="fi-stat" data-stat="${i}">${statHTML(ch.diff)}</span></li>`;
   }
 
@@ -587,8 +812,9 @@
       s.innerHTML =
         `<header class="file-head">` +
         `<button class="icon-btn fh-toggle" title="${esc(t('panels.toggle'))}">▾</button>` +
-        `<span class="badge s-${ch.status}" title="${esc(statusLabel(ch.status))}">${ch.status}</span>` +
+        `<span class="badge s-${ch.status}" title="${esc(statusTitle(ch))}">${ch.status}</span>` +
         `<span class="fh-path" title="${esc(ch.path)}">${path}</span>` +
+        `<span class="fh-conflict">${conflictBadgeHTML(ch)}</span>` +
         `<span class="fh-stat" data-stat="${i}">${statHTML(ch.diff)}</span>` +
         `<button class="icon-btn fh-copy" data-copy="${esc(ch.path)}" title="${esc(t('diff.copyPath'))}">⧉</button>` +
         `</header><div class="file-body placeholder">${esc(t('status.loading'))}</div>`;
@@ -670,6 +896,7 @@
     body.className = 'file-body';
     body.style.minHeight = '';
     body.innerHTML = diffBodyHTML(ch);
+    markConflictRows(body, ch);
     // Exibido sem tokens (sintaxe estava desligada): religar refaz só este corpo.
     if (d.kind === 'text' && d.lang && d.tokA === undefined) body.dataset.plain = '1';
     else delete body.dataset.plain;
@@ -931,8 +1158,8 @@
     if (state.lastHandle) el.reopenBtn.textContent = t('toolbar.reopen', { name: state.lastHandle.name });
     renderBranchOptions();
     rerenderCommitList();
-    if (state.current) {
-      renderCommitHeader(state.current);
+    if (state.subject) {
+      renderHeader();
       renderFiles();
       for (const ch of state.changes) {
         if (ch.diff && ch.diff.hunks) for (const h of ch.diff.hunks) h.ready = false; // marcas de CR têm title traduzido
@@ -990,7 +1217,8 @@
     let idx = items.findIndex((li) => li.classList.contains('active'));
     idx = idx < 0 ? 0 : idx + dir;
     if (idx < 0 || idx >= items.length) return;
-    run(selectCommit)(items[idx].dataset.sha);
+    if (items[idx].dataset.all) showCompareAll();
+    else run(selectCommit)(items[idx].dataset.sha);
     if (dir > 0 && idx >= items.length - 5) run(loadMoreCommits)();
   }
 
@@ -1025,8 +1253,21 @@
 
     el.commitList.addEventListener('click', (e) => {
       const li = e.target.closest('.commit');
-      if (li) run(selectCommit)(li.dataset.sha);
+      if (!li) return;
+      if (li.dataset.all) showCompareAll();
+      else run(selectCommit)(li.dataset.sha);
     });
+
+    el.appModeToggle.addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-appmode]');
+      if (b && b.dataset.appmode !== state.appMode) run(setAppMode)(b.dataset.appmode);
+    });
+    el.baseSelect.addEventListener('change', run(loadCompare));
+    el.headSelect.addEventListener('change', run(loadCompare));
+    el.swapBtn.addEventListener('click', run(() => {
+      [el.baseSelect.value, el.headSelect.value] = [el.headSelect.value, el.baseSelect.value];
+      return loadCompare();
+    }));
     el.commitScroll.addEventListener('scroll', () => {
       const s = el.commitScroll;
       if (s.scrollTop + s.clientHeight > s.scrollHeight - 200) run(loadMoreCommits)();
@@ -1072,6 +1313,12 @@
         run(selectCommit)(go.dataset.goto);
         return;
       }
+      const file = e.target.closest('[data-file]'); // link de arquivo no resumo de conflitos
+      if (file) {
+        e.preventDefault();
+        jumpToFile(+file.dataset.file);
+        return;
+      }
       const force = e.target.closest('[data-force]');
       if (force) {
         const s = force.closest('.file');
@@ -1111,7 +1358,8 @@
     });
 
     document.addEventListener('keydown', (e) => {
-      if (e.ctrlKey || e.metaKey || e.altKey || e.target.closest('input, select, textarea')) return;
+      const typing = e.target instanceof Element && e.target.closest('input, select, textarea');
+      if (e.ctrlKey || e.metaKey || e.altKey || typing) return;
       const map = { j: () => navigateCommit(1), k: () => navigateCommit(-1), n: () => navigateFile(1), p: () => navigateFile(-1) };
       if (map[e.key]) {
         e.preventDefault();
@@ -1130,6 +1378,7 @@
     setView(state.view, false);
     setHighlight(state.highlight, false);
     renderHighlightTitle();
+    setAppMode(state.appMode, false);
     setFileMode(state.fileMode, false);
     bindEvents();
 
