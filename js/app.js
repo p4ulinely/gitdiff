@@ -1,4 +1,4 @@
-/* Interface do visualizador. */
+/* Interface do visualizador. Todo texto visível vem de I18n (js/locales/*.js). */
 (function () {
   'use strict';
 
@@ -7,7 +7,7 @@
     pickBtn: $('pickBtn'), reopenBtn: $('reopenBtn'), dirInput: $('dirInput'),
     repoInfo: $('repoInfo'), repoName: $('repoName'), reloadBtn: $('reloadBtn'),
     branch: $('branchSelect'), hashForm: $('hashForm'), hashInput: $('hashInput'), hashBtn: $('hashBtn'),
-    status: $('status'), viewToggle: $('viewToggle'),
+    status: $('status'), viewToggle: $('viewToggle'), localeSelect: $('localeSelect'),
     commitCount: $('commitCount'), commitFilter: $('commitFilter'), commitScroll: $('commitScroll'),
     commitList: $('commitList'), loadMore: $('loadMore'),
     fileCount: $('fileCount'), fileFilter: $('fileFilter'), fileModeToggle: $('fileModeToggle'), fileList: $('fileList'),
@@ -15,6 +15,7 @@
     supportNote: $('supportNote'),
   };
 
+  const { t, html: th } = I18n;
   const esc = Diff.escapeHtml;
   const td = new TextDecoder('utf-8');
   const EMPTY = new Uint8Array(0);
@@ -23,7 +24,6 @@
     png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
     webp: 'image/webp', bmp: 'image/bmp', ico: 'image/x-icon', avif: 'image/avif',
   };
-  const STATUS_LABEL = { A: 'Adicionado', M: 'Modificado', D: 'Removido', R: 'Renomeado' };
 
   const LS = {
     get(k, d) {
@@ -49,30 +49,50 @@
     loadingMore: false,
     activeFile: -1,
     urls: [],
+    busyKey: null,
+    supportKey: null,
+    lastHandle: null,
   };
+
+  /* ---------- formatação dependente do idioma ---------- */
+
+  const fmt = (() => {
+    let locale = null, date, rel, num;
+    const sync = () => {
+      if (locale === I18n.locale) return;
+      locale = I18n.locale;
+      date = new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short' });
+      rel = new Intl.RelativeTimeFormat(locale, { numeric: 'auto' });
+      num = new Intl.NumberFormat(locale, { maximumFractionDigits: 1 });
+    };
+    const UNITS = [['year', 31536000], ['month', 2592000], ['week', 604800], ['day', 86400], ['hour', 3600], ['minute', 60]];
+    return {
+      date(sec) { sync(); return date.format(new Date(sec * 1000)); },
+      relative(sec) {
+        sync();
+        const diff = sec - Date.now() / 1000, abs = Math.abs(diff);
+        for (const [u, s] of UNITS) if (abs >= s) return rel.format(Math.round(diff / s), u);
+        return rel.format(0, 'second');
+      },
+      size(n) {
+        sync();
+        if (n < 1024) return num.format(n) + ' B';
+        if (n < 1048576) return num.format(n / 1024) + ' KB';
+        return num.format(n / 1048576) + ' MB';
+      },
+    };
+  })();
 
   /* ---------- utilitários ---------- */
 
   const short = (sha) => (sha ? sha.slice(0, 7) : '');
-  const dateFmt = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'medium', timeStyle: 'short' });
-  const rtf = new Intl.RelativeTimeFormat('pt-BR', { numeric: 'auto' });
-  const fmtDate = (sec) => dateFmt.format(new Date(sec * 1000));
-  function relTime(sec) {
-    const diff = sec - Date.now() / 1000, abs = Math.abs(diff);
-    const units = [['year', 31536000], ['month', 2592000], ['week', 604800], ['day', 86400], ['hour', 3600], ['minute', 60]];
-    for (const [u, s] of units) if (abs >= s) return rtf.format(Math.round(diff / s), u);
-    return 'agora';
-  }
-  function fmtSize(n) {
-    if (n < 1024) return n + ' B';
-    if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
-    return (n / 1048576).toFixed(1) + ' MB';
-  }
   const basename = (p) => p.slice(p.lastIndexOf('/') + 1);
   const dirname = (p) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '');
+  const statusLabel = (s) => t('files.status.' + s);
 
-  function busy(msg) {
-    el.status.innerHTML = msg ? `<span class="spinner"></span>${esc(msg)}` : '';
+  function busy(key) {
+    state.busyKey = key;
+    el.status.innerHTML = key ? `<span class="spinner"></span>${esc(t(key))}` : '';
   }
 
   let toastTimer = 0;
@@ -84,13 +104,15 @@
     toastTimer = setTimeout(() => (el.toast.hidden = true), kind === 'error' ? 6000 : 2000);
   }
 
+  const errorMessage = (e) => (e && e.code ? t('errors.' + e.code, e.params) : e && e.message ? e.message : String(e));
+
   const run = (fn) => async (...args) => {
     try {
       await fn(...args);
     } catch (e) {
       console.error(e);
       busy(null);
-      toast(e && e.message ? e.message : String(e), 'error');
+      toast(errorMessage(e), 'error');
     }
   };
 
@@ -131,7 +153,7 @@
   }
 
   async function openFS(fs) {
-    busy('Lendo repositório…');
+    busy('status.reading');
     try {
       const repo = await Git.Repo.open(fs);
       state.repo = repo;
@@ -150,14 +172,38 @@
     if (!state.repo) return;
     const keep = el.branch.value;
     const current = state.current && state.current.sha;
-    busy('Recarregando…');
+    busy('status.reloading');
     try {
       state.repo = await Git.Repo.open(state.repo.fs);
       await loadRefs(keep, current);
-      toast('Repositório recarregado');
+      toast(t('toast.reloaded'));
     } finally {
       busy(null);
     }
+  }
+
+  const REF_GROUPS = [['branches.local', 'refs/heads/'], ['branches.remote', 'refs/remotes/'], ['branches.tags', 'refs/tags/'], ['branches.other', 'refs/']];
+
+  function renderBranchOptions() {
+    const { refs, head } = state;
+    if (!head) return;
+    const keep = el.branch.value;
+    const buckets = REF_GROUPS.map(() => []);
+    for (const name of [...refs.keys()].sort((a, b) => a.localeCompare(b))) {
+      const g = REF_GROUPS.findIndex(([, p]) => name.startsWith(p));
+      buckets[g].push([name, name.slice(REF_GROUPS[g][1].length)]);
+    }
+    let h = '';
+    if (head.sha) h += `<option value="HEAD">${esc(t('branches.detached', { sha: short(head.sha) }))}</option>`;
+    REF_GROUPS.forEach(([label], g) => {
+      if (!buckets[g].length) return;
+      h += `<optgroup label="${esc(t(label))}">` +
+        buckets[g].map(([v, name]) => `<option value="${esc(v)}">${esc(name)}${v === head.ref ? ' ●' : ''}</option>`).join('') +
+        '</optgroup>';
+    });
+    el.branch.innerHTML = h;
+    el.branch.disabled = !h;
+    if (keep) el.branch.value = keep;
   }
 
   async function loadRefs(preferred, keepCommit) {
@@ -165,27 +211,12 @@
     const [refs, head] = await Promise.all([repo.listRefs(), repo.readHead()]);
     state.refs = refs;
     state.head = head;
+    el.branch.innerHTML = '';
+    renderBranchOptions();
 
-    const groups = [['Locais', 'refs/heads/'], ['Remotas', 'refs/remotes/'], ['Tags', 'refs/tags/'], ['Outras', 'refs/']];
-    const buckets = groups.map(() => []);
-    for (const name of [...refs.keys()].sort((a, b) => a.localeCompare(b))) {
-      const g = groups.findIndex(([, p]) => name.startsWith(p));
-      buckets[g].push([name, name.slice(groups[g][1].length)]);
-    }
-
-    let html = '';
-    if (head.sha) html += `<option value="HEAD">HEAD destacado (${short(head.sha)})</option>`;
-    groups.forEach(([label], g) => {
-      if (!buckets[g].length) return;
-      html += `<optgroup label="${label}">` +
-        buckets[g].map(([v, t]) => `<option value="${esc(v)}">${esc(t)}${v === head.ref ? ' ●' : ''}</option>`).join('') +
-        '</optgroup>';
-    });
-    el.branch.innerHTML = html;
-    el.branch.disabled = !html;
-
-    if (!html) {
-      el.commitList.innerHTML = '<li class="list-empty">Este repositório ainda não tem commits.</li>';
+    if (!el.branch.options.length) {
+      state.commits = [];
+      el.commitList.innerHTML = `<li class="list-empty">${esc(t('commits.none'))}</li>`;
       return;
     }
     const has = (v) => v && (v === 'HEAD' ? !!head.sha : refs.has(v));
@@ -203,7 +234,7 @@
     state.commits = [];
     el.commitList.innerHTML = '';
     el.commitCount.textContent = '';
-    busy('Carregando commits…');
+    busy('status.loadingCommits');
     await loadMoreCommits();
     busy(null);
     const target = keepCommit || (state.commits[0] && state.commits[0].sha);
@@ -237,16 +268,28 @@
       li.className = 'commit';
       li.dataset.sha = c.sha;
       li.dataset.search = (subject + ' ' + c.author.name + ' ' + c.author.email + ' ' + c.sha).toLowerCase();
-      li.title = `${subject}\n\n${c.author.name} <${c.author.email}>\n${fmtDate(c.author.time)}\n${c.sha}`;
+      li.title = `${subject}\n\n${c.author.name} <${c.author.email}>\n${fmt.date(c.author.time)}\n${c.sha}`;
       li.innerHTML =
-        `<div class="c-subject">${c.parents.length > 1 ? '<span class="tag-merge">merge</span>' : ''}${subject ? esc(subject) : '<em>(sem mensagem)</em>'}</div>` +
+        `<div class="c-subject">${c.parents.length > 1 ? `<span class="tag-merge">${esc(t('commits.merge'))}</span>` : ''}` +
+        `${subject ? esc(subject) : `<em>${esc(t('commits.noMessage'))}</em>`}</div>` +
         `<div class="c-meta"><code>${short(c.sha)}</code><span class="c-author">${esc(c.author.name)}</span>` +
-        `<time>${relTime(c.author.time)}</time></div>`;
+        `<time>${esc(fmt.relative(c.author.time))}</time></div>`;
       if (state.current && state.current.sha === c.sha) li.classList.add('active');
       if (q && !li.dataset.search.includes(q)) li.hidden = true;
       frag.appendChild(li);
     }
     el.commitList.appendChild(frag);
+  }
+
+  function rerenderCommitList() {
+    if (!state.commits.length) {
+      if (state.head && !el.branch.options.length) el.commitList.innerHTML = `<li class="list-empty">${esc(t('commits.none'))}</li>`;
+      return;
+    }
+    const top = el.commitScroll.scrollTop;
+    el.commitList.innerHTML = '';
+    appendCommits(state.commits);
+    el.commitScroll.scrollTop = top;
   }
 
   function filterCommits() {
@@ -271,7 +314,7 @@
     const gen = ++state.gen;
     markActiveCommit(sha);
     el.hashInput.value = sha;
-    busy('Calculando diferenças…');
+    busy('status.computing');
     try {
       const commit = await state.repo.readCommit(sha);
       const changes = await state.repo.diffCommit(commit);
@@ -291,22 +334,24 @@
 
   function renderCommitHeader(c) {
     const lines = c.message.replace(/\s+$/, '').split('\n');
-    const subject = lines[0] || '(sem mensagem)';
+    const subject = lines[0] || t('commits.noMessage');
     const body = lines.slice(1).join('\n').replace(/^\n+/, '');
     const a = c.author, cm = c.committer;
     const committerInfo = cm.name !== a.name || cm.email !== a.email
-      ? `<span>commitado por <strong>${esc(cm.name)}</strong> · ${fmtDate(cm.time)}</span>` : '';
-    const parents = c.parents.length
-      ? `<span>${c.parents.length > 1 ? 'Pais' : 'Pai'}: ${c.parents.map((p, i) => `<a href="#" data-goto="${p}" title="${p}">${short(p)}</a>${c.parents.length > 1 && i === 0 ? ' (comparado)' : ''}`).join(' ')}</span>`
-      : '<span>Commit inicial</span>';
+      ? `<span>${th('commit.committedBy', { name: cm.name, date: fmt.date(cm.time) })}</span>` : '';
+    const n = c.parents.length;
+    const parents = n
+      ? `<span>${esc(t('commit.parents', { count: n }))}: ${c.parents.map((p, i) =>
+          `<a href="#" data-goto="${p}" title="${p}">${short(p)}</a>${n > 1 && i === 0 ? ' ' + esc(t('commit.compared')) : ''}`).join(' ')}</span>`
+      : `<span>${esc(t('commit.initial'))}</span>`;
     el.commitHeader.hidden = false;
     el.commitHeader.innerHTML = `
       <div class="ch-subject">${esc(subject)}</div>
       ${body ? `<pre class="ch-body">${esc(body)}</pre>` : ''}
       <div class="ch-meta">
-        <span><strong>${esc(a.name)}</strong> &lt;${esc(a.email)}&gt; · <time title="${esc(a.tz)}">${fmtDate(a.time)}</time></span>
+        <span><strong>${esc(a.name)}</strong> &lt;${esc(a.email)}&gt; · <time title="${esc(a.tz)}">${esc(fmt.date(a.time))}</time></span>
         ${committerInfo}
-        <span class="ch-sha"><code>${c.sha}</code><button class="btn copy-btn" data-copy="${c.sha}">Copiar</button></span>
+        <span class="ch-sha"><code>${c.sha}</code><button class="btn copy-btn" data-copy="${c.sha}">${esc(t('commit.copy'))}</button></span>
         ${parents}
         <span class="ch-stats" id="commitStats"></span>
       </div>`;
@@ -390,8 +435,8 @@
   }
 
   function updateFileStats(i) {
-    const html = statHTML(state.changes[i].diff);
-    for (const n of document.querySelectorAll(`[data-stat="${i}"]`)) n.innerHTML = html;
+    const h = statHTML(state.changes[i].diff);
+    for (const n of document.querySelectorAll(`[data-stat="${i}"]`)) n.innerHTML = h;
     updateTotals();
   }
 
@@ -405,7 +450,8 @@
       done++;
       if (ch.diff.kind === 'text') { adds += ch.diff.adds; dels += ch.diff.dels; }
     }
-    node.innerHTML = `${n} arquivo${n === 1 ? '' : 's'} · <span class="add">+${adds}</span> <span class="del">−${dels}</span>${done < n ? ' <span class="muted">…</span>' : ''}`;
+    node.innerHTML = `${esc(t('commit.files', { count: n }))} · <span class="add">+${adds}</span> <span class="del">−${dels}</span>` +
+      (done < n ? ' <span class="muted">…</span>' : '');
   }
 
   function estimatePlaceholder(i) {
@@ -420,7 +466,7 @@
   /* ---------- lista de arquivos (lateral) ---------- */
 
   function fileItemHTML(ch, i, name, dir, depth) {
-    const title = (ch.oldPath ? ch.oldPath + ' → ' : '') + ch.path + ' (' + STATUS_LABEL[ch.status] + ')';
+    const title = (ch.oldPath ? ch.oldPath + ' → ' : '') + ch.path + ' (' + statusLabel(ch.status) + ')';
     return `<li class="file-item${i === state.activeFile ? ' active' : ''}" data-index="${i}" style="--depth:${depth}" title="${esc(title)}">` +
       `<span class="badge s-${ch.status}">${ch.status}</span>` +
       `<span class="fi-text">${esc(name)}${dir ? `<span class="fi-dir">${esc(dir)}</span>` : ''}</span>` +
@@ -470,7 +516,7 @@
     el.fileCount.textContent = state.changes.length ? String(state.changes.length) : '';
     el.fileList.innerHTML = items.length
       ? (state.fileMode === 'tree' ? treeHTML(items) : listHTML(items))
-      : `<li class="list-empty">${state.changes.length ? 'Nenhum arquivo corresponde ao filtro.' : 'Nenhum arquivo alterado.'}</li>`;
+      : `<li class="list-empty">${esc(t(state.changes.length ? 'files.noMatch' : 'files.none'))}</li>`;
   }
 
   function setActiveFile(i) {
@@ -506,7 +552,7 @@
     state.urls = [];
     el.diffs.innerHTML = '';
     if (!state.changes.length) {
-      el.diffs.innerHTML = '<div class="notice">Nenhuma alteração de arquivo neste commit.</div>';
+      el.diffs.innerHTML = `<div class="notice">${esc(t('diff.noChanges'))}</div>`;
       return;
     }
     const gen = state.gen;
@@ -528,17 +574,27 @@
       const path = ch.oldPath ? `${pathHTML(ch.oldPath)} <span class="dim">→</span> ${pathHTML(ch.path)}` : pathHTML(ch.path);
       s.innerHTML =
         `<header class="file-head">` +
-        `<button class="icon-btn fh-toggle" title="Recolher / expandir">▾</button>` +
-        `<span class="badge s-${ch.status}" title="${STATUS_LABEL[ch.status]}">${ch.status}</span>` +
+        `<button class="icon-btn fh-toggle" title="${esc(t('panels.toggle'))}">▾</button>` +
+        `<span class="badge s-${ch.status}" title="${esc(statusLabel(ch.status))}">${ch.status}</span>` +
         `<span class="fh-path" title="${esc(ch.path)}">${path}</span>` +
         `<span class="fh-stat" data-stat="${i}">${statHTML(ch.diff)}</span>` +
-        `<button class="icon-btn fh-copy" data-copy="${esc(ch.path)}" title="Copiar caminho">⧉</button>` +
-        `</header><div class="file-body placeholder">Carregando…</div>`;
+        `<button class="icon-btn fh-copy" data-copy="${esc(ch.path)}" title="${esc(t('diff.copyPath'))}">⧉</button>` +
+        `</header><div class="file-body placeholder">${esc(t('status.loading'))}</div>`;
       frag.appendChild(s);
       observer.observe(s);
     });
     el.diffs.appendChild(frag);
     state.changes.forEach((_, i) => estimatePlaceholder(i));
+  }
+
+  // Re-renderiza o painel de diffs mantendo o arquivo atual em vista.
+  function rerenderDiffs() {
+    const active = state.activeFile;
+    renderDiffs();
+    if (active >= 0) {
+      state.activeFile = -1;
+      jumpToFile(active);
+    }
   }
 
   async function renderFileBody(i, gen) {
@@ -550,7 +606,7 @@
     } catch (e) {
       if (gen !== state.gen) return;
       body.className = 'file-body';
-      body.innerHTML = `<div class="notice error">Erro ao ler o arquivo: ${esc(e.message)}</div>`;
+      body.innerHTML = `<div class="notice error">${esc(t('diff.readError', { message: errorMessage(e) }))}</div>`;
       return;
     }
     if (gen !== state.gen) return;
@@ -570,33 +626,37 @@
 
   function diffBodyHTML(ch) {
     const d = ch.diff;
-    const notice = (html) => `<div class="notice">${html}</div>`;
+    const notice = (h) => `<div class="notice">${h}</div>`;
     if (d.kind === 'submodule') {
-      return notice(`Submódulo: <code>${short(ch.oldSha) || '—'}</code> → <code>${short(ch.newSha) || '—'}</code>`);
+      return notice(th('diff.submodule', { old: short(ch.oldSha) || '—', new: short(ch.newSha) || '—' }));
     }
     if (d.kind === 'large') {
-      return notice(`Arquivo grande (${fmtSize(d.size)}). <button class="btn" data-force="1">Mostrar diff mesmo assim</button>`);
+      return notice(`${esc(t('diff.large', { size: fmt.size(d.size) }))} <button class="btn" data-force="1">${esc(t('diff.showAnyway'))}</button>`);
     }
     if (d.kind === 'binary') {
       if (d.type) {
         const fig = (side, cls, label, size) =>
-          `<figure class="${cls}"><figcaption>${label} · ${fmtSize(size)}</figcaption><img data-side="${side}" alt="${label}"></figure>`;
+          `<figure class="${cls}"><figcaption>${esc(label)} · ${esc(fmt.size(size))}</figcaption><img data-side="${side}" alt="${esc(label)}"></figure>`;
         return '<div class="img-diff">' +
-          (ch.oldSha ? fig('a', 'old', 'Antes', d.oldSize) : '') +
-          (ch.newSha ? fig('b', 'new', 'Depois', d.newSize) : '') + '</div>';
+          (ch.oldSha ? fig('a', 'old', t('diff.before'), d.oldSize) : '') +
+          (ch.newSha ? fig('b', 'new', t('diff.after'), d.newSize) : '') + '</div>';
       }
-      return notice(`Arquivo binário${ch.oldSha && ch.newSha ? ` (${fmtSize(d.oldSize)} → ${fmtSize(d.newSize)})` : ` (${fmtSize(d.oldSize || d.newSize)})`}`);
+      return notice(esc(ch.oldSha && ch.newSha
+        ? t('diff.binaryChanged', { old: fmt.size(d.oldSize), new: fmt.size(d.newSize) })
+        : t('diff.binary', { size: fmt.size(d.oldSize || d.newSize) })));
     }
     const modeNote = ch.oldMode && ch.newMode && ch.oldMode !== ch.newMode
-      ? notice(`Modo alterado: <code>${ch.oldMode}</code> → <code>${ch.newMode}</code>`) : '';
+      ? notice(th('diff.modeChanged', { old: ch.oldMode, new: ch.newMode })) : '';
     if (!d.hunks.length) {
-      return modeNote || notice(ch.status === 'R' ? 'Arquivo renomeado, sem alterações de conteúdo.' : 'Arquivo vazio.');
+      return modeNote || notice(esc(t(ch.status === 'R' ? 'diff.renamedOnly' : 'diff.empty')));
     }
     return modeNote + (state.view === 'split' ? splitHTML(d) : unifiedHTML(d));
   }
 
-  function lineHTML(text, t) {
-    if (text.endsWith('\r')) return esc(text.slice(0, -1)) + (t ? '<span class="cr" title="CR (\\r)">␍</span>' : '');
+  const crMark = () => `<span class="cr" title="${esc(t('diff.cr'))}">␍</span>`;
+
+  function lineHTML(text, type) {
+    if (text.endsWith('\r')) return esc(text.slice(0, -1)) + (type ? crMark() : '');
     return esc(text);
   }
 
@@ -617,8 +677,8 @@
         const a = L[i + p], b = L[j + p];
         const r = Diff.intraline(a.text.replace(/\r$/, ''), b.text.replace(/\r$/, ''));
         if (r) {
-          a.html = r[0] + (a.text.endsWith('\r') ? '<span class="cr">␍</span>' : '');
-          b.html = r[1] + (b.text.endsWith('\r') ? '<span class="cr">␍</span>' : '');
+          a.html = r[0] + (a.text.endsWith('\r') ? crMark() : '');
+          b.html = r[1] + (b.text.endsWith('\r') ? crMark() : '');
         }
       }
       i = k;
@@ -628,7 +688,6 @@
   const CLS = ['ctx', 'del', 'add'];
   const SIGN = [' ', '-', '+'];
   const hunkLabel = (h) => `@@ -${h.oldStart},${h.oldLines} +${h.newStart},${h.newLines} @@`;
-  const EOL_TEXT = 'Sem quebra de linha no final do arquivo';
 
   function eolFlags(l, d) {
     return {
@@ -638,6 +697,7 @@
   }
 
   function unifiedHTML(d) {
+    const eolText = '\\ ' + esc(t('diff.noEol'));
     let h = '<table class="diff unified"><colgroup><col class="c-ln"><col class="c-ln"><col></colgroup><tbody>';
     for (const hunk of d.hunks) {
       prepareHunk(hunk);
@@ -647,21 +707,22 @@
         h += `<tr><td class="ln ${c}" data-ln="${l.o || ''}"></td><td class="ln ${c}" data-ln="${l.n || ''}"></td>` +
           `<td class="code ${c}" data-sign="${SIGN[l.t]}">${l.html}</td></tr>`;
         const e = eolFlags(l, d);
-        if (e.a || e.b) h += `<tr class="eol"><td class="ln" colspan="2"></td><td class="code">\\ ${EOL_TEXT}</td></tr>`;
+        if (e.a || e.b) h += `<tr class="eol"><td class="ln" colspan="2"></td><td class="code">${eolText}</td></tr>`;
       }
     }
     return h + '</tbody></table>';
   }
 
   function splitHTML(d) {
+    const eolText = '\\ ' + esc(t('diff.noEol'));
     const side = (l, which, last) => {
       if (!l) return `<td class="ln empty"></td><td class="code empty${last ? '' : ' l'}"></td>`;
-      const c = l.t === 0 ? 'ctx' : CLS[l.t];
+      const c = CLS[l.t];
       const no = which === 'a' ? l.o : l.n;
       return `<td class="ln ${c}" data-ln="${no}"></td><td class="code ${c}${last ? '' : ' l'}" data-sign="${SIGN[l.t]}">${l.html}</td>`;
     };
     const eolRow = (ea, eb) =>
-      `<tr class="eol"><td class="ln"></td><td class="code l">${ea ? '\\ ' + EOL_TEXT : ''}</td><td class="ln"></td><td class="code">${eb ? '\\ ' + EOL_TEXT : ''}</td></tr>`;
+      `<tr class="eol"><td class="ln"></td><td class="code l">${ea ? eolText : ''}</td><td class="ln"></td><td class="code">${eb ? eolText : ''}</td></tr>`;
 
     let h = '<table class="diff split"><colgroup><col class="c-ln"><col><col class="c-ln"><col></colgroup><tbody>';
     for (const hunk of d.hunks) {
@@ -698,14 +759,7 @@
     state.view = view;
     LS.set('view', view);
     for (const b of el.viewToggle.querySelectorAll('button')) b.classList.toggle('on', b.dataset.view === view);
-    if (rerender && state.changes.length) {
-      const active = state.activeFile;
-      renderDiffs();
-      if (active >= 0) {
-        state.activeFile = -1;
-        jumpToFile(active);
-      }
-    }
+    if (rerender && state.changes.length) rerenderDiffs();
   }
 
   function setFileMode(mode, rerender = true) {
@@ -713,6 +767,33 @@
     LS.set('fileMode', mode);
     for (const b of el.fileModeToggle.querySelectorAll('button')) b.classList.toggle('on', b.dataset.mode === mode);
     if (rerender) renderFiles();
+  }
+
+  /* ---------- idioma ---------- */
+
+  function renderLocaleSelect() {
+    el.localeSelect.innerHTML = I18n.available()
+      .map(({ code, name }) => `<option value="${esc(code)}">${esc(name)}</option>`)
+      .join('');
+    el.localeSelect.value = I18n.locale;
+  }
+
+  // Textos dinâmicos (fora do HTML estático) são refeitos ao trocar de idioma.
+  function onLocaleChange() {
+    el.localeSelect.value = I18n.locale;
+    if (state.busyKey) busy(state.busyKey);
+    el.supportNote.textContent = state.supportKey ? t(state.supportKey) : '';
+    if (state.lastHandle) el.reopenBtn.textContent = t('toolbar.reopen', { name: state.lastHandle.name });
+    renderBranchOptions();
+    rerenderCommitList();
+    if (state.current) {
+      renderCommitHeader(state.current);
+      renderFiles();
+      for (const ch of state.changes) {
+        if (ch.diff && ch.diff.hunks) for (const h of ch.diff.hunks) h.ready = false; // marcas de CR têm title traduzido
+      }
+      rerenderDiffs();
+    }
   }
 
   /* ---------- painéis recolhíveis e redimensionáveis ---------- */
@@ -786,6 +867,7 @@
     }));
     el.reloadBtn.addEventListener('click', run(reloadRepo));
     el.branch.addEventListener('change', run(() => loadBranch()));
+    el.localeSelect.addEventListener('change', () => I18n.setLocale(el.localeSelect.value));
 
     el.hashForm.addEventListener('submit', (e) => {
       e.preventDefault();
@@ -835,7 +917,7 @@
       const copy = e.target.closest('[data-copy]');
       if (copy) {
         e.stopPropagation();
-        navigator.clipboard.writeText(copy.dataset.copy).then(() => toast('Copiado!'), () => toast('Não foi possível copiar', 'error'));
+        navigator.clipboard.writeText(copy.dataset.copy).then(() => toast(t('toast.copied')), () => toast(t('toast.copyFailed'), 'error'));
         return;
       }
       const go = e.target.closest('[data-goto]');
@@ -852,7 +934,7 @@
         ch.force = true;
         ch.promise = null;
         ch.diff = null;
-        s.querySelector('.file-body').innerHTML = 'Calculando…';
+        s.querySelector('.file-body').textContent = t('status.computing');
         renderFileBody(i, state.gen);
         return;
       }
@@ -890,28 +972,34 @@
   /* ---------- inicialização ---------- */
 
   async function init() {
+    I18n.init();
+    renderLocaleSelect();
+    I18n.onChange(onLocaleChange);
     setupPanels();
     setView(state.view, false);
     setFileMode(state.fileMode, false);
     bindEvents();
 
     if (!('DecompressionStream' in window)) {
-      el.supportNote.textContent = 'Seu navegador não suporta DecompressionStream; use uma versão recente do Chrome, Edge, Firefox ou Safari.';
+      state.supportKey = 'support.noDecompression';
+      el.supportNote.textContent = t(state.supportKey);
       el.pickBtn.disabled = true;
       return;
     }
     if (!window.showDirectoryPicker) {
-      el.supportNote.textContent = 'Seu navegador não suporta a File System Access API; será usado o seletor de pasta padrão (pode ser mais lento em projetos grandes). Chrome ou Edge recomendados.';
+      state.supportKey = 'support.noFsAccess';
+      el.supportNote.textContent = t(state.supportKey);
       return;
     }
     try {
       const h = await idbGet('lastDir');
       if (h && h.kind === 'directory') {
-        el.reopenBtn.textContent = `Reabrir “${h.name}”`;
+        state.lastHandle = h;
+        el.reopenBtn.textContent = t('toolbar.reopen', { name: h.name });
         el.reopenBtn.hidden = false;
         el.reopenBtn.addEventListener('click', run(async () => {
           const perm = await h.requestPermission({ mode: 'read' });
-          if (perm !== 'granted') throw new Error('Permissão de leitura negada.');
+          if (perm !== 'granted') throw new Error(t('toast.permissionDenied'));
           await openFS(new GitFS.HandleFS(h));
         }));
       }

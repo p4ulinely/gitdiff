@@ -22,6 +22,18 @@
     return out;
   }
 
+  // Erros carregam um código + parâmetros; a interface traduz (chave errors.<code>).
+  class GitError extends Error {
+    constructor(code, params = {}) {
+      super(code);
+      this.name = 'GitError';
+      this.code = code;
+      this.params = params;
+    }
+  }
+  const fail = (code, params) => { throw new GitError(code, params); };
+  const short = (sha) => String(sha).slice(0, 7);
+
   async function inflate(blob) {
     const stream = blob.stream().pipeThrough(new DecompressionStream('deflate'));
     return new Uint8Array(await new Response(stream).arrayBuffer());
@@ -65,7 +77,7 @@
     };
     const baseSize = varint();
     const resultSize = varint();
-    if (baseSize !== base.length) throw new Error('Delta inválido: tamanho da base não confere');
+    if (baseSize !== base.length) fail('deltaBaseMismatch');
     const out = new Uint8Array(resultSize);
     let o = 0;
     while (i < delta.length) {
@@ -87,7 +99,7 @@
         i += op;
         o += op;
       } else {
-        throw new Error('Delta inválido: opcode 0');
+        fail('deltaOpcode');
       }
     }
     return out;
@@ -100,7 +112,7 @@
       this.idx = idx;
       const dv = (this.dv = new DataView(idx.buffer, idx.byteOffset, idx.byteLength));
       if (dv.getUint32(0) !== 0xff744f63 || dv.getUint32(4) !== 2) {
-        throw new Error(`Formato de índice não suportado: ${name}.idx`);
+        fail('unsupportedIndex', { file: name + '.idx' });
       }
       this.count = dv.getUint32(8 + 255 * 4);
       this.shaOff = 8 + 256 * 4;
@@ -226,11 +238,8 @@
       let gitDir;
       if (await fs.getFile('.git/HEAD')) gitDir = '.git/';
       else if ((await fs.getFile('HEAD')) && (await fs.list('objects')).length) gitDir = '';
-      else if (await fs.getFile('.git')) {
-        throw new Error('Esta pasta é um worktree ou submódulo (o arquivo .git aponta para outro lugar). Abra o repositório principal.');
-      } else {
-        throw new Error('Nenhum repositório git encontrado nesta pasta (não há .git).');
-      }
+      else if (await fs.getFile('.git')) fail('worktree');
+      else fail('notARepo');
       const repo = new Repo(fs, gitDir);
       await repo.loadPacks();
       return repo;
@@ -272,7 +281,7 @@
       const hit = this.cache.get(sha);
       if (hit) return hit;
       const f = await this.fs.getFile(this.p(`objects/${sha.slice(0, 2)}/${sha.slice(2)}`));
-      if (!f) throw new Error(`Objeto não encontrado: ${sha.slice(0, 10)} (clone raso ou parcial?)`);
+      if (!f) fail('objectNotFound', { sha: sha.slice(0, 10) });
       const raw = await inflate(f);
       const nul = raw.indexOf(0);
       const type = td.decode(raw.subarray(0, nul)).split(' ')[0];
@@ -317,7 +326,7 @@
       } else if (TYPE_NAMES[type]) {
         obj = { type: TYPE_NAMES[type], data };
       } else {
-        throw new Error(`Tipo de objeto desconhecido no pack: ${type}`);
+        fail('unknownPackType', { type });
       }
       this.cache.set(key, obj, obj.data.length + 64);
       return obj;
@@ -327,7 +336,7 @@
       let c = this.commits.get(sha);
       if (c) return c;
       const o = await this.readObject(sha);
-      if (o.type !== 'commit') throw new Error(`${sha.slice(0, 7)} não é um commit (${o.type})`);
+      if (o.type !== 'commit') fail('notACommit', { sha: short(sha), type: o.type });
       c = parseCommit(sha, o.data);
       this.commits.set(sha, c);
       return c;
@@ -337,7 +346,7 @@
       let t = this.trees.get(sha);
       if (t) return t;
       const o = await this.readObject(sha);
-      if (o.type !== 'tree') throw new Error(`${sha.slice(0, 7)} não é uma árvore`);
+      if (o.type !== 'tree') fail('notATree', { sha: short(sha) });
       t = parseTree(o.data);
       if (this.trees.size > 20000) this.trees.clear();
       this.trees.set(sha, t);
@@ -346,7 +355,7 @@
 
     async readBlob(sha) {
       const o = await this.readObject(sha);
-      if (o.type !== 'blob') throw new Error(`${sha.slice(0, 7)} não é um blob`);
+      if (o.type !== 'blob') fail('notABlob', { sha: short(sha) });
       return o.data;
     }
 
@@ -354,12 +363,12 @@
       for (let n = 0; n < 20; n++) {
         const o = await this.readObject(sha);
         if (o.type === 'commit') return sha;
-        if (o.type !== 'tag') throw new Error(`${sha.slice(0, 7)} aponta para um ${o.type}, não para um commit`);
+        if (o.type !== 'tag') fail('notCommitish', { sha: short(sha), type: o.type });
         const m = /^object ([0-9a-f]{40})/m.exec(td.decode(o.data));
-        if (!m) throw new Error('Tag inválida');
+        if (!m) fail('invalidTag');
         sha = m[1];
       }
-      throw new Error('Cadeia de tags longa demais');
+      fail('tagChainTooLong');
     }
 
     async listRefs() {
@@ -384,7 +393,7 @@
       };
       await walk('refs');
       if (!refs.size && (await this.fs.list(this.p('reftable'))).length) {
-        throw new Error('Este repositório usa o formato "reftable", que ainda não é suportado.');
+        fail('reftable');
       }
       return refs;
     }
@@ -418,7 +427,7 @@
             } catch { /* ignora */ }
           }
           if (commits.length === 1) return commits[0];
-          throw new Error(`Hash ambíguo "${s}": ${matches.length} objetos começam com ele.`);
+          fail('ambiguous', { ref: s, count: matches.length });
         }
       }
       const refs = await this.listRefs();
@@ -430,13 +439,13 @@
       for (const name of [s, 'refs/' + s, 'refs/heads/' + s, 'refs/tags/' + s, 'refs/remotes/' + s]) {
         if (refs.has(name)) return this.peelToCommit(refs.get(name));
       }
-      throw new Error(`Commit não encontrado: "${s}"`);
+      fail('commitNotFound', { ref: s });
     }
 
     // Aceita hash completo/abreviado, nome de branch/tag e sufixos ~N / ^N.
     async resolve(input) {
       const s = input.trim();
-      if (!s) throw new Error('Informe um hash de commit.');
+      if (!s) fail('emptyRef');
       const m = /^(.+?)((?:[~^]\d*)*)$/.exec(s);
       let sha = await this.resolveBase(m[1]);
       for (const [, op, num] of m[2].matchAll(/([~^])(\d*)/g)) {
@@ -444,11 +453,11 @@
         if (op === '~') {
           for (let k = 0; k < n; k++) {
             sha = (await this.readCommit(sha)).parents[0];
-            if (!sha) throw new Error(`"${s}" vai além do primeiro commit.`);
+            if (!sha) fail('beyondRoot', { ref: s });
           }
         } else if (n > 0) {
           sha = (await this.readCommit(sha)).parents[n - 1];
-          if (!sha) throw new Error(`"${s}": o commit não tem o pai ${n}.`);
+          if (!sha) fail('noSuchParent', { ref: s, n });
         }
       }
       return sha;
@@ -559,5 +568,5 @@
     }
   }
 
-  window.Git = { Repo, LogWalker };
+  window.Git = { Repo, LogWalker, GitError };
 })();

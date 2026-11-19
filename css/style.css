@@ -119,6 +119,7 @@ select:focus, input:focus, .btn:focus-visible { outline: 2px solid var(--accent)
 .hash-form { display: flex; gap: 6px; }
 .hash-form input { width: 300px; font-family: var(--mono); font-size: 13px; }
 .spacer { flex: 1; }
+.locale-select { font-size: 13px; padding: 4px 6px; }
 .status { color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 6px; }
 .spinner {
   width: 12px; height: 12px; border-radius: 50%;

@@ -23,6 +23,25 @@ Nada é enviado para fora: o `.git` é lido localmente pelo navegador.
 
 No Firefox e no Safari é usado o seletor de pasta padrão (`webkitdirectory`). Funciona, mas é mais lento em projetos grandes.
 
+## Idiomas
+
+Inglês (padrão) e português. O idioma é trocado pelo seletor no canto superior direito e a escolha fica salva no navegador.
+
+Para adicionar um idioma:
+
+1. Copie `js/locales/en.js` para `js/locales/<código>.js` (ex.: `es.js`, `fr.js`).
+2. Troque o código e o nome em `I18n.register('es', { name: 'Español', ... })` e traduza os valores. Não mude as chaves.
+3. Inclua `<script src="js/locales/es.js"></script>` no `index.html`, junto dos outros idiomas.
+
+O novo idioma aparece sozinho no seletor. Chaves não traduzidas caem para o inglês e geram um aviso no console. Para listar o que falta traduzir, rode `I18n.missing('es')` no console.
+
+Formato das mensagens:
+
+- `{nome}` é substituído por um parâmetro, e os parâmetros são escapados quando o texto vai para o HTML.
+- Plurais usam um objeto `{ one, other }`, mais `zero`, `few`, `many` etc. quando o idioma precisar, seguindo as regras do `Intl.PluralRules`.
+- Datas, tempo relativo ("há 3 dias") e números são formatados pelo `Intl` no idioma ativo.
+- Os erros do leitor git (`js/git.js`) não têm texto: eles carregam um código, traduzido pela chave `errors.<código>`.
+
 ## Limitações
 
 - Commits de merge são comparados com o primeiro pai
@@ -34,6 +53,8 @@ No Firefox e no Safari é usado o seletor de pasta padrão (`webkitdirectory`). 
 ```
 index.html
 css/style.css
+js/i18n.js   motor de tradução (fallback, plurais, data-i18n no HTML)
+js/locales/  um arquivo por idioma (en.js é a referência)
 js/fs.js     acesso a arquivos (File System Access API / webkitdirectory)
 js/git.js    leitura do repositório: objetos, packs, refs, histórico, diff de árvores
 js/diff.js   diff de linhas (Myers + fallback patience), hunks, destaque intralinha
