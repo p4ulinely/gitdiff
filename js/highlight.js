@@ -912,8 +912,14 @@
 
   const MAX_CHARS = 1.5 * 1024 * 1024;
 
+  // Nomes exibidos na interface (dica do botão Sintaxe). Fonte única: ao adicionar uma
+  // linguagem, atualize EXT e esta lista. As traduções usam {langs} e não precisam mudar.
+  const LANGUAGES = ['C#', 'JavaScript/JSX', 'TypeScript/TSX', 'HTML', 'CSS/SCSS/Less', 'Razor', 'Vue',
+    'Python', 'C', 'C++', 'Java'];
+
   window.Highlight = {
     MAX_CHARS,
+    LANGUAGES,
     langFor(path) {
       const i = path.lastIndexOf('.');
       return i < 0 ? null : EXT[path.slice(i + 1).toLowerCase()] || null;

@@ -24,13 +24,19 @@ Pontos que não são óbvios:
 - **Fim de cada objeto no pack:** é o offset do próximo objeto, tirado dos offsets ordenados do `.idx`. O `DecompressionStream` falha se houver bytes sobrando, então o slice precisa ser exato.
 - **Ordem de leitura:** `readObject` procura nos packs antes dos objetos soltos, porque a busca no pack é em memória e a de objeto solto custa IPC de FS.
 - **Corridas assíncronas:** `state.gen` é incrementado a cada troca de commit. Todo trabalho assíncrono confere o `gen` antes de mexer no DOM.
+- **Re-render preservando o estado:** trocar Unificado/Lado a lado ou o idioma chama `rerenderDiffs()`.
+  - Antes de re-renderizar, ela captura uma âncora: a linha no topo do painel, identificada por `tr[data-o][data-n]` (números de linha antigo/novo), mais o deslocamento em px. Depois restaura pela linha, não pelo `scrollTop`, porque as alturas mudam entre os modos.
+  - Os arquivos recolhidos ficam em `state.collapsed`, e não só no DOM.
+  - `renderFileBody` pode ser chamada várias vezes para o mesmo arquivo (observer, âncora, religar a sintaxe). Só a chamada mais recente escreve no DOM (`body.renderSeq`).
 - **Renderização sob demanda:** os diffs são renderizados quando ficam visíveis (`IntersectionObserver`). As estatísticas (+/−) são calculadas em segundo plano por `computeAllStats`, e cada arquivo guarda seu resultado em `ch.diff` e `ch.promise`.
 - **Arquivo sem `\n` final:** a última linha recebe um sufixo `\u0000` só na chave de comparação. Assim, "sem quebra de linha no final" conta como diferença.
 - **Realce de sintaxe:**
   - **Arquivo inteiro:** os lados antigo e novo são tokenizados inteiros, nunca por hunk, para que comentários e strings de várias linhas e blocos Razor saiam certos. Isso é feito em `ensureTokens(ch)` no `renderFileBody` (o único caminho de renderização do corpo), só para arquivos exibidos com realce. O resultado fica em `ch.diff.tokA`/`tokB`. **Não guarde o texto dos arquivos no diff:** as estatísticas são calculadas para todos os arquivos do commit, e guardar o texto multiplicaria a memória. Os blobs são relidos do cache do repositório.
   - **Heurísticas de classificação** (`classify`): depois de `.`/`->` é sempre membro, nunca palavra-chave (`promise.catch`, `map.get`); CAIXA_ALTA é constante (`lit`); `match`/`case` do Python só são palavra-chave no início de instrução; contextuais do C# usadas como nome de variável (`file`, `value`…) ficam fora da lista.
   - **Combinação com o destaque de palavras:** `lineHTML()` no `app.js` corta os tokens nos limites dos intervalos do `intraline`, para que `<mark>` e `<span class="hl-*">` fiquem bem aninhados.
-  - **Cache de linha:** `hunk.ready` guarda o modo (`'hl'`/`'plain'`). Ligar ou desligar o realce (`state.highlight`, salvo em `localStorage`) refaz só o necessário.
+  - **Para adicionar uma linguagem:** (1) um lexer ou um ramo no `lexCode`; (2) as extensões em `EXT`; (3) o nome em `LANGUAGES`, que alimenta a dica do botão via `{langs}`, sem mexer nas traduções; (4) a linha de recursos no README; (5) fuzzing + amostra real.
+  - **Ligar/desligar é só CSS:** o HTML sai com as cores sempre que os tokens existem, e `setHighlight` alterna `.no-hl` em `#diffs`. Ao ligar, só os corpos marcados `data-plain` (exibidos sem tokens) são refeitos. Com a sintaxe desligada, nada é tokenizado. **Não volte a re-renderizar o painel inteiro nessa troca.**
+  - **Cache de linha:** `hunk.ready` guarda o modo (`'hl'`/`'plain'`, conforme existam tokens). O destaque de palavras (`line.ranges`) é calculado uma vez por hunk (`hunk.ranged`).
   - **Invariantes do highlighter:** (1) a concatenação dos tokens é exatamente o texto de entrada; (2) todo laço de lexer consome pelo menos um caractere. Quebrar qualquer uma delas faz texto sumir ou trava a aba.
   - **JSX:**
     - Ligado em `.js`/`.jsx` (lang `js`) e `.tsx` (lang `tsx`). Desligado no `.ts` puro, onde `<T>expr` é um cast.
@@ -53,7 +59,15 @@ Pontos que não são óbvios:
 
 ## Como testar
 
-Não há suíte de testes no repositório. A interface precisa ser testada manualmente no Chrome ou no Edge, porque o seletor de pasta é um diálogo nativo e não dá para automatizar. Já `git.js` e `diff.js` não dependem do DOM e podem ser testados no Node 22+:
+Não há suíte de testes no repositório.
+
+**Interface (ponta a ponta):** o Chrome está instalado em `C:/Program Files/Google/Chrome/Application/chrome.exe`. A receita que funcionou:
+- gere um repositório de teste e um manifesto JSON do `.git` dele;
+- monte uma cópia do `index.html` com um script que substitui `window.showDirectoryPicker` por um handle falso (`getDirectoryHandle`/`getFileHandle`/`entries`) que lê os arquivos via `fetch`;
+- sirva tudo com um servidor HTTP em Node, abra o `chrome --headless=new --remote-debugging-port=…` e leia o resultado de um cenário em `window.__result` via `Runtime.evaluate` (WebSocket do DevTools Protocol; o Node 22 tem `WebSocket` global);
+- capture `error`/`unhandledrejection` na página. O handle falso não é clonável, então o `idbSet` falha ali, e isso é esperado.
+
+**Núcleo:** `git.js` e `diff.js` não dependem do DOM e podem ser testados no Node 22+:
 
 - carregue os arquivos com `vm.runInThisContext` após `globalThis.window = globalThis`;
 - implemente a interface de FS com `fs.openAsBlob` (devolve um `Blob` com `slice`, `stream` e `arrayBuffer`);

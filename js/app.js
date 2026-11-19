@@ -49,6 +49,7 @@
     observer: null,
     loadingMore: false,
     activeFile: -1,
+    collapsed: new Set(), // índices dos arquivos recolhidos no commit atual
     urls: [],
     busyKey: null,
     supportKey: null,
@@ -125,10 +126,16 @@
       req.onupgradeneeded = () => req.result.createObjectStore('kv');
       req.onerror = () => reject(req.error);
       req.onsuccess = () => {
-        const tx = req.result.transaction('kv', mode);
-        const r = fn(tx.objectStore('kv'));
-        tx.oncomplete = () => resolve(r && r.result);
-        tx.onerror = () => reject(tx.error);
+        // Exceções aqui (ex.: DataCloneError, quota) viram rejeição em vez de erro não tratado.
+        try {
+          const tx = req.result.transaction('kv', mode);
+          const r = fn(tx.objectStore('kv'));
+          tx.oncomplete = () => resolve(r && r.result);
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error);
+        } catch (e) {
+          reject(e);
+        }
       };
     });
   }
@@ -323,6 +330,7 @@
       state.current = commit;
       state.changes = changes;
       state.activeFile = -1;
+      state.collapsed = new Set();
       renderCommitHeader(commit);
       renderFiles();
       renderDiffs();
@@ -538,6 +546,7 @@
     const s = el.diffs.querySelector(`.file[data-index="${i}"]`);
     if (!s) return;
     s.classList.remove('collapsed');
+    state.collapsed.delete(i);
     s.scrollIntoView({ block: 'start' });
     setActiveFile(i);
   }
@@ -572,7 +581,7 @@
     const frag = document.createDocumentFragment();
     state.changes.forEach((ch, i) => {
       const s = document.createElement('section');
-      s.className = 'file';
+      s.className = state.collapsed.has(i) ? 'file collapsed' : 'file';
       s.dataset.index = i;
       const path = ch.oldPath ? `${pathHTML(ch.oldPath)} <span class="dim">→</span> ${pathHTML(ch.path)}` : pathHTML(ch.path);
       s.innerHTML =
@@ -590,33 +599,80 @@
     state.changes.forEach((_, i) => estimatePlaceholder(i));
   }
 
-  // Re-renderiza o painel de diffs mantendo o arquivo atual em vista.
-  function rerenderDiffs() {
-    const active = state.activeFile;
-    renderDiffs();
-    if (active >= 0) {
-      state.activeFile = -1;
-      jumpToFile(active);
+  /* Âncora de rolagem: a linha do diff que está no topo do painel (arquivo + número de linha
+   * antigo/novo + deslocamento em px). Sobrevive à troca Unificado/Lado a lado, em que as
+   * alturas mudam, porque é restaurada pela linha, não pelo scrollTop. */
+  function captureAnchor() {
+    const paneTop = el.diffPane.getBoundingClientRect().top;
+    for (const s of el.diffs.querySelectorAll('.file')) {
+      const r = s.getBoundingClientRect();
+      if (r.bottom <= paneTop) continue;
+      const i = +s.dataset.index;
+      if (r.top >= paneTop || s.classList.contains('collapsed')) return { i, offset: r.top - paneTop };
+      const rows = s.querySelectorAll('tr[data-o]');
+      let lo = 0, hi = rows.length;
+      while (lo < hi) { // primeira linha cuja base está abaixo do topo do painel
+        const m = (lo + hi) >> 1;
+        if (rows[m].getBoundingClientRect().bottom <= paneTop) lo = m + 1;
+        else hi = m;
+      }
+      const row = rows[lo];
+      if (!row) return { i, offset: r.top - paneTop };
+      return { i, o: row.dataset.o, n: row.dataset.n, offset: row.getBoundingClientRect().top - paneTop };
     }
+    return null;
   }
 
+  async function restoreAnchor(a, gen) {
+    const s = el.diffs.querySelector(`.file[data-index="${a.i}"]`);
+    if (!s) return;
+    let target = s;
+    if (a.o !== undefined) {
+      if (s.querySelector('.file-body.placeholder')) {
+        if (state.observer) state.observer.unobserve(s);
+        await renderFileBody(a.i, gen);
+        if (gen !== state.gen || !s.isConnected) return;
+      }
+      const rows = [...s.querySelectorAll('tr[data-o]')];
+      const find = (key, v) => (v ? rows.find((tr) => tr.dataset[key] === v) : null);
+      target = find('n', a.n) || find('o', a.o) || s;
+    }
+    el.diffPane.scrollTop += target.getBoundingClientRect().top - el.diffPane.getBoundingClientRect().top - a.offset;
+  }
+
+  // Re-renderiza o painel de diffs (troca de modo/idioma) mantendo recolhidos e a linha em vista.
+  async function rerenderDiffs() {
+    const anchor = captureAnchor();
+    const gen = state.gen;
+    renderDiffs();
+    if (anchor) await restoreAnchor(anchor, gen);
+  }
+
+  /* Renderiza o corpo de um arquivo. Pode ser chamada de novo para o mesmo arquivo
+   * (observer, âncora, religar a sintaxe): só a chamada mais recente escreve no DOM. */
   async function renderFileBody(i, gen) {
     const ch = state.changes[i];
     const body = el.diffs.querySelector(`.file[data-index="${i}"] .file-body`);
     if (!body) return;
+    const seq = (body.renderSeq = (body.renderSeq || 0) + 1);
+    const stale = () => gen !== state.gen || body.renderSeq !== seq || !body.isConnected;
     try {
       await computeFileDiff(ch);
     } catch (e) {
-      if (gen !== state.gen) return;
+      if (stale()) return;
       body.className = 'file-body';
       body.innerHTML = `<div class="notice error">${esc(t('diff.readError', { message: errorMessage(e) }))}</div>`;
       return;
     }
     if (state.highlight) await ensureTokens(ch);
-    if (gen !== state.gen) return;
+    if (stale()) return;
+    const d = ch.diff;
     body.className = 'file-body';
     body.style.minHeight = '';
     body.innerHTML = diffBodyHTML(ch);
+    // Exibido sem tokens (sintaxe estava desligada): religar refaz só este corpo.
+    if (d.kind === 'text' && d.lang && d.tokA === undefined) body.dataset.plain = '1';
+    else delete body.dataset.plain;
     if (ch.diff.kind === 'binary' && ch.diff.type) {
       for (const img of body.querySelectorAll('img[data-side]')) {
         const bytes = ch.diff[img.dataset.side];
@@ -716,36 +772,39 @@
     return h + (cr && changed ? crMark() : '');
   }
 
-  // Prepara o HTML de cada linha: realce de sintaxe (se ligado) + destaque de palavras entre pares -/+.
+  /* Prepara o HTML de cada linha: tokens de sintaxe (quando já calculados) + destaque de
+   * palavras entre pares -/+. As cores entram sempre que há tokens; ligar/desligar a sintaxe
+   * só alterna a classe .no-hl no painel (CSS), sem refazer este HTML. */
   function prepareHunk(h, d) {
-    const tokA = (state.highlight && d.tokA) || null;
-    const tokB = (state.highlight && d.tokB) || null;
+    const tokA = d.tokA || null, tokB = d.tokB || null;
     const mode = tokA || tokB ? 'hl' : 'plain';
     if (h.ready === mode) return;
     h.ready = mode;
 
     const L = h.lines;
-    const ranges = new Map();
-    for (let i = 0; i < L.length;) {
-      if (L[i].t !== 1) { i++; continue; }
-      let j = i;
-      while (j < L.length && L[j].t === 1) j++;
-      let k = j;
-      while (k < L.length && L[k].t === 2) k++;
-      for (let p = 0, pairs = Math.min(j - i, k - j); p < pairs; p++) {
-        const a = L[i + p], b = L[j + p];
-        const r = Diff.intraline(a.text.replace(/\r$/, ''), b.text.replace(/\r$/, ''));
-        if (r) {
-          ranges.set(a, r[0]);
-          ranges.set(b, r[1]);
+    if (!h.ranged) { // destaque de palavras: não depende do modo, calculado uma vez
+      h.ranged = true;
+      for (let i = 0; i < L.length;) {
+        if (L[i].t !== 1) { i++; continue; }
+        let j = i;
+        while (j < L.length && L[j].t === 1) j++;
+        let k = j;
+        while (k < L.length && L[k].t === 2) k++;
+        for (let p = 0, pairs = Math.min(j - i, k - j); p < pairs; p++) {
+          const a = L[i + p], b = L[j + p];
+          const r = Diff.intraline(a.text.replace(/\r$/, ''), b.text.replace(/\r$/, ''));
+          if (r) {
+            a.ranges = r[0];
+            b.ranges = r[1];
+          }
         }
+        i = k;
       }
-      i = k;
     }
     for (const l of L) {
       // Contexto usa o lado novo; linhas removidas, o antigo.
       const lineToks = l.t === 1 ? tokA && tokA[l.o - 1] : tokB && tokB[l.n - 1];
-      l.html = lineHTML(lineToks || [[null, l.text]], ranges.get(l), l.t !== 0);
+      l.html = lineHTML(lineToks || [[null, l.text]], l.ranges, l.t !== 0);
     }
   }
 
@@ -768,7 +827,7 @@
       h += `<tr class="hunk"><td class="ln" colspan="2"></td><td class="code">${hunkLabel(hunk)}</td></tr>`;
       for (const l of hunk.lines) {
         const c = CLS[l.t];
-        h += `<tr><td class="ln ${c}" data-ln="${l.o || ''}"></td><td class="ln ${c}" data-ln="${l.n || ''}"></td>` +
+        h += `<tr data-o="${l.o || ''}" data-n="${l.n || ''}"><td class="ln ${c}" data-ln="${l.o || ''}"></td><td class="ln ${c}" data-ln="${l.n || ''}"></td>` +
           `<td class="code ${c}" data-sign="${SIGN[l.t]}">${l.html}</td></tr>`;
         const e = eolFlags(l, d);
         if (e.a || e.b) h += `<tr class="eol"><td class="ln" colspan="2"></td><td class="code">${eolText}</td></tr>`;
@@ -796,7 +855,7 @@
       for (let i = 0; i < L.length;) {
         if (L[i].t === 0) {
           const l = L[i++];
-          h += `<tr>${side(l, 'a', false)}${side(l, 'b', true)}</tr>`;
+          h += `<tr data-o="${l.o}" data-n="${l.n}">${side(l, 'a', false)}${side(l, 'b', true)}</tr>`;
           const e = eolFlags(l, d);
           if (e.a || e.b) h += eolRow(e.a, e.b);
           continue;
@@ -807,7 +866,8 @@
         while (k < L.length && L[k].t === 2) k++;
         const dels = L.slice(i, j), adds = L.slice(j, k);
         for (let p = 0; p < Math.max(dels.length, adds.length); p++) {
-          h += `<tr>${side(dels[p], 'a', false)}${side(adds[p], 'b', true)}</tr>`;
+          h += `<tr data-o="${dels[p] ? dels[p].o : ''}" data-n="${adds[p] ? adds[p].n : ''}">` +
+            `${side(dels[p], 'a', false)}${side(adds[p], 'b', true)}</tr>`;
           const ea = dels[p] && eolFlags(dels[p], d).a, eb = adds[p] && eolFlags(adds[p], d).b;
           if (ea || eb) h += eolRow(ea, eb);
         }
@@ -823,15 +883,27 @@
     state.view = view;
     LS.set('view', view);
     for (const b of el.viewToggle.querySelectorAll('button')) b.classList.toggle('on', b.dataset.view === view);
-    if (rerender && state.changes.length) rerenderDiffs();
+    if (rerender && state.changes.length) rerenderDiffs().catch(console.error);
   }
 
-  function setHighlight(on, rerender = true) {
+  /* Ligar/desligar a sintaxe não re-renderiza o painel: as cores são escondidas por CSS
+   * (.no-hl). Ao ligar, só os arquivos já exibidos sem tokens são refeitos, um a um, com as
+   * mesmas linhas, então a rolagem e os arquivos recolhidos não mudam. */
+  function setHighlight(on, refresh = true) {
     state.highlight = on;
     LS.set('highlight', on);
     el.hlToggle.classList.toggle('on', on);
     el.hlToggle.setAttribute('aria-pressed', String(on));
-    if (rerender && state.changes.length) rerenderDiffs();
+    el.diffs.classList.toggle('no-hl', !on);
+    if (refresh && on) {
+      for (const body of el.diffs.querySelectorAll('.file-body[data-plain]')) {
+        renderFileBody(+body.closest('.file').dataset.index, state.gen);
+      }
+    }
+  }
+
+  function renderHighlightTitle() {
+    el.hlToggle.title = t('toolbar.highlightTitle', { langs: Highlight.LANGUAGES.join(', ') });
   }
 
   function setFileMode(mode, rerender = true) {
@@ -853,6 +925,7 @@
   // Textos dinâmicos (fora do HTML estático) são refeitos ao trocar de idioma.
   function onLocaleChange() {
     el.localeSelect.value = I18n.locale;
+    renderHighlightTitle();
     if (state.busyKey) busy(state.busyKey);
     el.supportNote.textContent = state.supportKey ? t(state.supportKey) : '';
     if (state.lastHandle) el.reopenBtn.textContent = t('toolbar.reopen', { name: state.lastHandle.name });
@@ -864,7 +937,7 @@
       for (const ch of state.changes) {
         if (ch.diff && ch.diff.hunks) for (const h of ch.diff.hunks) h.ready = false; // marcas de CR têm title traduzido
       }
-      rerenderDiffs();
+      rerenderDiffs().catch(console.error);
     }
   }
 
@@ -1012,7 +1085,12 @@
         return;
       }
       const head = e.target.closest('.file-head');
-      if (head) head.parentElement.classList.toggle('collapsed');
+      if (head) {
+        const s = head.parentElement;
+        const i = +s.dataset.index;
+        if (s.classList.toggle('collapsed')) state.collapsed.add(i);
+        else state.collapsed.delete(i);
+      }
     });
 
     // Destaca na lateral o arquivo visível no topo do painel de diff.
@@ -1051,6 +1129,7 @@
     setupPanels();
     setView(state.view, false);
     setHighlight(state.highlight, false);
+    renderHighlightTitle();
     setFileMode(state.fileMode, false);
     bindEvents();
 

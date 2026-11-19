@@ -59,6 +59,6 @@ js/locales/  um arquivo por idioma (en.js é a referência)
 js/fs.js     acesso a arquivos (File System Access API / webkitdirectory)
 js/git.js    leitura do repositório: objetos, packs, refs, histórico, diff de árvores
 js/diff.js   diff de linhas (Myers + fallback patience), hunks, destaque intralinha
-js/highlight.js  realce de sintaxe (C#, JS, TS, HTML, CSS, Razor, Vue, Python, C, C++, Java)
+js/highlight.js  realce de sintaxe (lista de linguagens em Highlight.LANGUAGES)
 js/app.js    interface
 ```

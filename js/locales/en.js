@@ -13,7 +13,7 @@ I18n.register('en', {
       unified: 'Unified',
       split: 'Split',
       highlight: 'Syntax',
-      highlightTitle: 'Syntax highlighting by file extension (C#, JS, TS, HTML, CSS, Razor, Vue, Python, C, C++, Java)',
+      highlightTitle: 'Syntax highlighting by file extension: {langs}',
       language: 'Language',
     },
     panels: {

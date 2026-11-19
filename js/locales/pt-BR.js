@@ -13,7 +13,7 @@ I18n.register('pt-BR', {
       unified: 'Unificado',
       split: 'Lado a lado',
       highlight: 'Sintaxe',
-      highlightTitle: 'Realce de sintaxe pela extensão do arquivo (C#, JS, TS, HTML, CSS, Razor, Vue, Python, C, C++, Java)',
+      highlightTitle: 'Realce de sintaxe pela extensão do arquivo: {langs}',
       language: 'Idioma',
     },
     panels: {

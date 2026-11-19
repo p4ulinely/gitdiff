@@ -315,7 +315,9 @@ tr.hunk td.code { padding-left: 10px; }
 tr.eol td.code { color: var(--muted); font-style: italic; }
 .cr { color: var(--muted); font-size: 10px; margin-left: 2px; }
 
-/* Realce de sintaxe (js/highlight.js) */
+/* Realce de sintaxe (js/highlight.js). Desligado = .no-hl no painel: as cores são
+   neutralizadas aqui, sem re-renderizar (a especificidade vence .hl-*). */
+.diffs.no-hl [class*="hl-"] { color: inherit; font-style: inherit; }
 .hl-kw { color: var(--hl-kw); }
 .hl-str { color: var(--hl-str); }
 .hl-com { color: var(--hl-com); font-style: italic; }
