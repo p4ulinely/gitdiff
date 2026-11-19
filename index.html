@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Git Diff Viewer</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M5 3.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm0 2.122a2.25 2.25 0 1 0-1.5 0v5.256a2.25 2.25 0 1 0 1.5 0V9.5h3.75a2.75 2.75 0 0 0 2.75-2.75v-1.378a2.25 2.25 0 1 0-1.5 0v1.378c0 .69-.56 1.25-1.25 1.25H5ZM4.25 12a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5Zm6.5-8.75a.75.75 0 1 1 1.5 0 .75.75 0 0 1-1.5 0Z"/></svg>
+      <span>gitdiff</span>
+    </div>
+
+    <button id="pickBtn" class="btn primary">Abrir pasta…</button>
+    <button id="reopenBtn" class="btn" hidden></button>
+    <input id="dirInput" type="file" webkitdirectory hidden>
+
+    <div class="repo-info" id="repoInfo" hidden>
+      <span class="repo-name" id="repoName"></span>
+      <button id="reloadBtn" class="icon-btn" title="Recarregar repositório (novos commits/branches)">⟳</button>
+    </div>
+
+    <label class="field">
+      <span>Branch</span>
+      <select id="branchSelect" disabled></select>
+    </label>
+
+    <form id="hashForm" class="hash-form">
+      <input id="hashInput" type="text" placeholder="Hash do commit, branch, HEAD~2…" autocomplete="off" spellcheck="false" disabled>
+      <button id="hashBtn" class="btn" disabled>Ver</button>
+    </form>
+
+    <div class="spacer"></div>
+    <span id="status" class="status" aria-live="polite"></span>
+
+    <div class="seg" id="viewToggle" role="group" aria-label="Modo de exibição">
+      <button data-view="unified">Unificado</button>
+      <button data-view="split">Lado a lado</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="panel" id="commitsPanel">
+      <div class="panel-head">
+        <button class="icon-btn chevron" data-collapse="commitsPanel" title="Recolher / expandir">‹</button>
+        <h2>Commits <span class="count" id="commitCount"></span></h2>
+      </div>
+      <div class="panel-tools">
+        <input type="search" id="commitFilter" placeholder="Filtrar commits carregados…">
+      </div>
+      <div class="panel-body" id="commitScroll">
+        <ul class="commit-list" id="commitList"></ul>
+        <button id="loadMore" class="btn load-more" hidden>Carregar mais</button>
+      </div>
+    </aside>
+    <div class="resizer" data-target="commitsPanel"></div>
+
+    <aside class="panel" id="filesPanel">
+      <div class="panel-head">
+        <button class="icon-btn chevron" data-collapse="filesPanel" title="Recolher / expandir">‹</button>
+        <h2>Arquivos alterados <span class="count" id="fileCount"></span></h2>
+      </div>
+      <div class="panel-tools">
+        <input type="search" id="fileFilter" placeholder="Filtrar arquivos…">
+        <div class="seg small" id="fileModeToggle" role="group" aria-label="Modo da lista">
+          <button data-mode="list" title="Lista">Lista</button>
+          <button data-mode="tree" title="Árvore de pastas">Árvore</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <ul class="file-list" id="fileList"></ul>
+      </div>
+    </aside>
+    <div class="resizer" data-target="filesPanel"></div>
+
+    <section class="diff-pane" id="diffPane">
+      <div id="commitHeader" class="commit-header" hidden></div>
+      <div id="diffs" class="diffs">
+        <div class="welcome">
+          <h1>Visualizador de diferenças Git</h1>
+          <p>Clique em <strong>Abrir pasta…</strong> e escolha a pasta de um repositório git (a que contém <code>.git</code>).
+             Depois escolha a branch e um commit na lista, ou digite o hash no campo do topo.</p>
+          <ul>
+            <li>Tudo roda localmente no navegador. Nenhum arquivo é enviado.</li>
+            <li>Atalhos: <kbd>j</kbd>/<kbd>k</kbd> próximo/anterior commit, <kbd>n</kbd>/<kbd>p</kbd> próximo/anterior arquivo.</li>
+            <li>O campo de hash aceita hash abreviado, nome de branch/tag e sufixos como <code>HEAD~3</code> ou <code>abc123^2</code>.</li>
+          </ul>
+          <p class="muted" id="supportNote"></p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="js/fs.js"></script>
+  <script src="js/git.js"></script>
+  <script src="js/diff.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
