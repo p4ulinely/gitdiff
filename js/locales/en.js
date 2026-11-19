@@ -12,6 +12,8 @@ I18n.register('en', {
       viewMode: 'Display mode',
       unified: 'Unified',
       split: 'Split',
+      highlight: 'Syntax',
+      highlightTitle: 'Syntax highlighting by file extension (C#, JS, TS, HTML, CSS, Razor, Vue, Python, C, C++, Java)',
       language: 'Language',
     },
     panels: {

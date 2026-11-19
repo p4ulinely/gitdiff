@@ -6,7 +6,7 @@ Visualizador de diferenças git que roda no navegador e é estático. O `.git` �
 
 - **JavaScript puro, sem dependências, sem build, sem npm.** Não adicione frameworks nem bibliotecas.
 - **Scripts clássicos, não ES modules.** A página precisa funcionar aberta via `file://`, onde `import` é bloqueado por CORS. Cada arquivo é uma IIFE que expõe um global (`GitFS`, `Git`, `Diff`, `I18n`).
-- **A ordem dos `<script>` no `index.html` importa:** `i18n.js` → `locales/*.js` → `fs.js` → `git.js` → `diff.js` → `app.js`.
+- **A ordem dos `<script>` no `index.html` importa:** `i18n.js` → `locales/*.js` → `fs.js` → `git.js` → `diff.js` → `highlight.js` → `app.js`.
 - APIs do navegador usadas: File System Access API (`showDirectoryPicker`), com `<input webkitdirectory>` como alternativa; `DecompressionStream('deflate')` para o zlib; `Intl`; IndexedDB para lembrar a última pasta; `localStorage` para preferências (chaves com prefixo `gitdiff:`).
 
 ## Arquitetura
@@ -15,7 +15,8 @@ Visualizador de diferenças git que roda no navegador e é estático. O `.git` �
 |---|---|
 | `js/fs.js` | Interface mínima de FS: `getFile(path) → File\|null` e `list(path) → [{name, kind}]`. Implementações `HandleFS` e `FileListFS`. |
 | `js/git.js` | `Repo`: objetos soltos, packfiles (idx v2, OFS/REF_DELTA), refs, packed-refs, `resolve()` (hash abreviado, refs, `~N`/`^N`), `diffTrees`, `diffCommit` (com renomeações exatas). `LogWalker`: histórico por data do committer. |
-| `js/diff.js` | Myers O(ND) com limite `maxD`. Acima dele usa o fallback *patience* (âncoras em linhas únicas + LIS). Também `buildHunks` e `intraline` (destaque de palavras). Não depende do DOM. |
+| `js/diff.js` | Myers O(ND) com limite `maxD`. Acima dele usa o fallback *patience* (âncoras em linhas únicas + LIS). Também `buildHunks` e `intraline`, que devolve intervalos `[início, fim)` das palavras alteradas. Não depende do DOM. |
+| `js/highlight.js` | Realce de sintaxe próprio (lexers à mão com regex sticky). Linguagens: C# (principal), JS, TS, HTML, CSS, Razor (`.cshtml`/`.razor`), Vue, Python, C, C++ e Java. JS, TS, C#, C, C++ e Java compartilham o `lexCode`, com ramos por linguagem. Python tem lexer próprio (`lexPython`). O mapeamento de extensões fica em `EXT`, e `.h` é tratado como C++ (as palavras-chave de C++ incluem as de C). `Highlight.lines(texto, lang)` devolve tokens `[classe, texto]` por linha. Não depende do DOM. |
 | `js/i18n.js` | `t()`, `html()`, plurais, fallback para `en`, `data-i18n*`, `I18n.missing(code)`. |
 | `js/app.js` | Toda a interface e o estado (`state`). |
 
@@ -25,6 +26,18 @@ Pontos que não são óbvios:
 - **Corridas assíncronas:** `state.gen` é incrementado a cada troca de commit. Todo trabalho assíncrono confere o `gen` antes de mexer no DOM.
 - **Renderização sob demanda:** os diffs são renderizados quando ficam visíveis (`IntersectionObserver`). As estatísticas (+/−) são calculadas em segundo plano por `computeAllStats`, e cada arquivo guarda seu resultado em `ch.diff` e `ch.promise`.
 - **Arquivo sem `\n` final:** a última linha recebe um sufixo `\u0000` só na chave de comparação. Assim, "sem quebra de linha no final" conta como diferença.
+- **Realce de sintaxe:**
+  - **Arquivo inteiro:** os lados antigo e novo são tokenizados inteiros, nunca por hunk, para que comentários e strings de várias linhas e blocos Razor saiam certos. Isso é feito em `ensureTokens(ch)` no `renderFileBody` (o único caminho de renderização do corpo), só para arquivos exibidos com realce. O resultado fica em `ch.diff.tokA`/`tokB`. **Não guarde o texto dos arquivos no diff:** as estatísticas são calculadas para todos os arquivos do commit, e guardar o texto multiplicaria a memória. Os blobs são relidos do cache do repositório.
+  - **Heurísticas de classificação** (`classify`): depois de `.`/`->` é sempre membro, nunca palavra-chave (`promise.catch`, `map.get`); CAIXA_ALTA é constante (`lit`); `match`/`case` do Python só são palavra-chave no início de instrução; contextuais do C# usadas como nome de variável (`file`, `value`…) ficam fora da lista.
+  - **Combinação com o destaque de palavras:** `lineHTML()` no `app.js` corta os tokens nos limites dos intervalos do `intraline`, para que `<mark>` e `<span class="hl-*">` fiquem bem aninhados.
+  - **Cache de linha:** `hunk.ready` guarda o modo (`'hl'`/`'plain'`). Ligar ou desligar o realce (`state.highlight`, salvo em `localStorage`) refaz só o necessário.
+  - **Invariantes do highlighter:** (1) a concatenação dos tokens é exatamente o texto de entrada; (2) todo laço de lexer consome pelo menos um caractere. Quebrar qualquer uma delas faz texto sumir ou trava a aba.
+  - **JSX:**
+    - Ligado em `.js`/`.jsx` (lang `js`) e `.tsx` (lang `tsx`). Desligado no `.ts` puro, onde `<T>expr` é um cast.
+    - Um `<` só abre elemento quando `prev` está em `JSX_AFTER`, ou seja, onde pode começar uma expressão: `(`, `=`, `=>`, `return`… Assim `a < b` e `useState<T>()` continuam sendo código.
+    - `TS_GENERIC` exclui `<T,>` e `<T extends X>`.
+  - **SCSS/Less (`lexCss`):** dentro de um bloco, `nome:` é decidido por `isDeclaration()`, que olha adiante: se aparece `{` antes de `;`/`}`, é um seletor aninhado (`a:hover {`). Também são reconhecidos `$var`/`@var`, `#{}`, `%placeholder`, `@include nome(...)` e `!default`.
+  - **`</script>` e `</style>`:** um comentário dentro dessas tags não pode passar do fechamento (veja `clampEnd`), igual ao navegador.
 
 ## Convenções
 
@@ -46,7 +59,10 @@ Não há suíte de testes no repositório. A interface precisa ser testada manua
 - implemente a interface de FS com `fs.openAsBlob` (devolve um `Blob` com `slice`, `stream` e `arrayBuffer`);
 - monte um repositório de teste com commits, renomeações, binários, arquivos sem EOL, merge e tag anotada; rode `git gc` para gerar packs com deltas e crie um commit solto depois;
 - compare com o git: `git rev-list --date-order`, `git diff-tree -r --no-renames --numstat` (os +/− por arquivo devem bater) e `git rev-parse` para o `resolve()`;
-- para o diff, compare a contagem de linhas iguais com uma LCS por programação dinâmica em sequências aleatórias, e force o fallback patience com `Diff.diffSeq(a, b, 3)`.
+- para o diff, compare a contagem de linhas iguais com uma LCS por programação dinâmica em sequências aleatórias, e force o fallback patience com `Diff.diffSeq(a, b, 3)`;
+- para o highlighter, faça fuzzing com fragmentos problemáticos (`@{`, `"""`, `${`, `</script>`, `@*`…) em todas as linguagens. Confira que a concatenação dos tokens é igual à entrada e que o número de linhas bate, e inspecione amostras reais de C# e Razor imprimindo `[classe:texto]`.
+
+No Git Bash do Windows, heredocs podem perder barras invertidas: grave scripts de teste com a ferramenta de escrita de arquivos.
 
 Para checar a sintaxe: `node --check js/*.js js/locales/*.js`.
 

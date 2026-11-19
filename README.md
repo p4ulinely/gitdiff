@@ -17,6 +17,7 @@ Nada é enviado para fora: o `.git` é lido localmente pelo navegador.
 - Painéis de commits e de arquivos alterados, ambos recolhíveis e redimensionáveis
 - Arquivos alterados em lista ou em árvore de pastas, com filtro e contagem de +/−
 - Diff unificado ou lado a lado, com destaque das palavras alteradas
+- Realce de sintaxe pela extensão do arquivo, ligado por padrão (botão **Sintaxe**): C# (`.cs`), JavaScript/JSX, TypeScript/TSX, HTML, CSS/SCSS/Less, Razor (`.cshtml`), Vue, Python, C, C++ e Java
 - Detecção de renomeações exatas, de arquivos binários e de submódulos, com prévia de imagens antes/depois
 - Atalhos: `j`/`k` para o próximo/anterior commit, `n`/`p` para o próximo/anterior arquivo
 - No Chrome/Edge, o botão **Reabrir** volta à última pasta usada
@@ -58,5 +59,6 @@ js/locales/  um arquivo por idioma (en.js é a referência)
 js/fs.js     acesso a arquivos (File System Access API / webkitdirectory)
 js/git.js    leitura do repositório: objetos, packs, refs, histórico, diff de árvores
 js/diff.js   diff de linhas (Myers + fallback patience), hunks, destaque intralinha
+js/highlight.js  realce de sintaxe (C#, JS, TS, HTML, CSS, Razor, Vue, Python, C, C++, Java)
 js/app.js    interface
 ```

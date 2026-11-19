@@ -20,6 +20,17 @@
   --ren-fg: #8250df;
   --hunk-bg: #ddf4ff;
   --hunk-fg: #57606a;
+  --hl-kw: #cf222e;
+  --hl-str: #0a3069;
+  --hl-com: #6e7781;
+  --hl-num: #0550ae;
+  --hl-fn: #8250df;
+  --hl-type: #953800;
+  --hl-tag: #116329;
+  --hl-attr: #0550ae;
+  --hl-meta: #8250df;
+  --hl-lit: #0550ae;
+  --hl-re: #116329;
   --mono: ui-monospace, SFMono-Regular, "Cascadia Code", "JetBrains Mono", Consolas, "Liberation Mono", monospace;
 }
 
@@ -45,6 +56,17 @@
     --ren-fg: #a371f7;
     --hunk-bg: #388bfd1a;
     --hunk-fg: #8d96a0;
+    --hl-kw: #ff7b72;
+    --hl-str: #a5d6ff;
+    --hl-com: #8b949e;
+    --hl-num: #79c0ff;
+    --hl-fn: #d2a8ff;
+    --hl-type: #ffa657;
+    --hl-tag: #7ee787;
+    --hl-attr: #79c0ff;
+    --hl-meta: #d2a8ff;
+    --hl-lit: #79c0ff;
+    --hl-re: #7ee787;
   }
 }
 
@@ -103,6 +125,8 @@ select:focus, input:focus, .btn:focus-visible { outline: 2px solid var(--accent)
 .seg button + button { border-left: 1px solid var(--border); }
 .seg button.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .seg.small button { font-size: 12px; padding: 3px 8px; }
+.btn.toggle { font-size: 13px; padding: 4px 10px; color: var(--muted); }
+.btn.toggle.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
 
 /* ---------- Topo ---------- */
 .topbar {
@@ -290,6 +314,19 @@ tr.hunk td { background: var(--hunk-bg); color: var(--hunk-fg); padding-top: 3px
 tr.hunk td.code { padding-left: 10px; }
 tr.eol td.code { color: var(--muted); font-style: italic; }
 .cr { color: var(--muted); font-size: 10px; margin-left: 2px; }
+
+/* Realce de sintaxe (js/highlight.js) */
+.hl-kw { color: var(--hl-kw); }
+.hl-str { color: var(--hl-str); }
+.hl-com { color: var(--hl-com); font-style: italic; }
+.hl-num { color: var(--hl-num); }
+.hl-fn { color: var(--hl-fn); }
+.hl-type { color: var(--hl-type); }
+.hl-tag { color: var(--hl-tag); }
+.hl-attr { color: var(--hl-attr); }
+.hl-meta { color: var(--hl-meta); }
+.hl-lit { color: var(--hl-lit); }
+.hl-re { color: var(--hl-re); }
 
 .img-diff { display: flex; gap: 16px; padding: 16px; flex-wrap: wrap; }
 .img-diff figure { margin: 0; flex: 1; min-width: 200px; text-align: center; }

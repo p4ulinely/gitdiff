@@ -7,7 +7,7 @@
     pickBtn: $('pickBtn'), reopenBtn: $('reopenBtn'), dirInput: $('dirInput'),
     repoInfo: $('repoInfo'), repoName: $('repoName'), reloadBtn: $('reloadBtn'),
     branch: $('branchSelect'), hashForm: $('hashForm'), hashInput: $('hashInput'), hashBtn: $('hashBtn'),
-    status: $('status'), viewToggle: $('viewToggle'), localeSelect: $('localeSelect'),
+    status: $('status'), viewToggle: $('viewToggle'), hlToggle: $('hlToggle'), localeSelect: $('localeSelect'),
     commitCount: $('commitCount'), commitFilter: $('commitFilter'), commitScroll: $('commitScroll'),
     commitList: $('commitList'), loadMore: $('loadMore'),
     fileCount: $('fileCount'), fileFilter: $('fileFilter'), fileModeToggle: $('fileModeToggle'), fileList: $('fileList'),
@@ -44,6 +44,7 @@
     changes: [],
     gen: 0,
     view: LS.get('view', 'unified'),
+    highlight: LS.get('highlight', true),
     fileMode: LS.get('fileMode', 'list'),
     observer: null,
     loadingMore: false,
@@ -408,6 +409,8 @@
       kind: 'text', hunks, adds, dels,
       oldCount: A.lines.length, newCount: B.lines.length,
       noEolOld: A.noEol, noEolNew: B.noEol,
+      // Os tokens de sintaxe (tokA/tokB) são calculados só quando o arquivo é exibido: ensureTokens().
+      lang: hunks.length ? Highlight.langFor(ch.path) : null,
     });
   }
 
@@ -609,6 +612,7 @@
       body.innerHTML = `<div class="notice error">${esc(t('diff.readError', { message: errorMessage(e) }))}</div>`;
       return;
     }
+    if (state.highlight) await ensureTokens(ch);
     if (gen !== state.gen) return;
     body.className = 'file-body';
     body.style.minHeight = '';
@@ -655,33 +659,93 @@
 
   const crMark = () => `<span class="cr" title="${esc(t('diff.cr'))}">␍</span>`;
 
-  function lineHTML(text, type) {
-    if (text.endsWith('\r')) return esc(text.slice(0, -1)) + (type ? crMark() : '');
-    return esc(text);
+  /* Tokens de sintaxe por linha dos dois lados (d.tokA = antigo, d.tokB = novo), calculados
+   * sobre o arquivo inteiro na primeira vez que ele é exibido com realce. O texto não fica
+   * guardado no diff: os blobs são relidos do cache do repositório. */
+  async function ensureTokens(ch) {
+    const d = ch.diff;
+    if (!d || d.kind !== 'text' || !d.lang || d.tokA !== undefined) return;
+    try {
+      const [a, b] = await Promise.all([
+        ch.oldSha ? state.repo.readBlob(ch.oldSha) : EMPTY,
+        ch.newSha ? state.repo.readBlob(ch.newSha) : EMPTY,
+      ]);
+      d.tokA = a.length ? Highlight.lines(td.decode(a), d.lang) : null;
+      d.tokB = b.length ? Highlight.lines(td.decode(b), d.lang) : null;
+    } catch (e) {
+      console.warn(e);
+      d.tokA = d.tokB = null; // sem realce para este arquivo, mas o diff continua
+    }
   }
 
-  // Prepara o HTML de cada linha, com destaque de palavras entre pares removido/adicionado.
-  function prepareHunk(h) {
-    if (h.ready) return;
-    h.ready = true;
+  /* HTML de uma linha: combina tokens de sintaxe [classe, texto] com os intervalos
+   * [início, fim) de palavras alteradas. Os tokens são cortados nos limites dos intervalos
+   * para que <mark> e <span> fiquem bem aninhados. */
+  function lineHTML(tokens, ranges, changed) {
+    let toks = tokens, cr = false;
+    const last = toks[toks.length - 1];
+    if (last && last[1].endsWith('\r')) {
+      cr = true;
+      toks = toks.slice(0, -1);
+      if (last[1].length > 1) toks.push([last[0], last[1].slice(0, -1)]);
+    }
+    let h = '', pos = 0, r = 0, inMark = false;
+    for (const [cls, text] of toks) {
+      let i = 0;
+      while (i < text.length) {
+        let end = text.length, marked = false;
+        if (ranges) {
+          while (r < ranges.length && ranges[r][1] <= pos + i) r++;
+          const rg = ranges[r];
+          if (rg) {
+            marked = pos + i >= rg[0];
+            end = Math.min(end, (marked ? rg[1] : rg[0]) - pos);
+          }
+        }
+        if (marked !== inMark) {
+          h += marked ? '<mark>' : '</mark>';
+          inMark = marked;
+        }
+        const piece = esc(text.slice(i, end));
+        h += cls ? `<span class="hl-${cls}">${piece}</span>` : piece;
+        i = end;
+      }
+      pos += text.length;
+    }
+    if (inMark) h += '</mark>';
+    return h + (cr && changed ? crMark() : '');
+  }
+
+  // Prepara o HTML de cada linha: realce de sintaxe (se ligado) + destaque de palavras entre pares -/+.
+  function prepareHunk(h, d) {
+    const tokA = (state.highlight && d.tokA) || null;
+    const tokB = (state.highlight && d.tokB) || null;
+    const mode = tokA || tokB ? 'hl' : 'plain';
+    if (h.ready === mode) return;
+    h.ready = mode;
+
     const L = h.lines;
-    for (const l of L) l.html = lineHTML(l.text, l.t);
+    const ranges = new Map();
     for (let i = 0; i < L.length;) {
       if (L[i].t !== 1) { i++; continue; }
       let j = i;
       while (j < L.length && L[j].t === 1) j++;
       let k = j;
       while (k < L.length && L[k].t === 2) k++;
-      const pairs = Math.min(j - i, k - j);
-      for (let p = 0; p < pairs; p++) {
+      for (let p = 0, pairs = Math.min(j - i, k - j); p < pairs; p++) {
         const a = L[i + p], b = L[j + p];
         const r = Diff.intraline(a.text.replace(/\r$/, ''), b.text.replace(/\r$/, ''));
         if (r) {
-          a.html = r[0] + (a.text.endsWith('\r') ? crMark() : '');
-          b.html = r[1] + (b.text.endsWith('\r') ? crMark() : '');
+          ranges.set(a, r[0]);
+          ranges.set(b, r[1]);
         }
       }
       i = k;
+    }
+    for (const l of L) {
+      // Contexto usa o lado novo; linhas removidas, o antigo.
+      const lineToks = l.t === 1 ? tokA && tokA[l.o - 1] : tokB && tokB[l.n - 1];
+      l.html = lineHTML(lineToks || [[null, l.text]], ranges.get(l), l.t !== 0);
     }
   }
 
@@ -700,7 +764,7 @@
     const eolText = '\\ ' + esc(t('diff.noEol'));
     let h = '<table class="diff unified"><colgroup><col class="c-ln"><col class="c-ln"><col></colgroup><tbody>';
     for (const hunk of d.hunks) {
-      prepareHunk(hunk);
+      prepareHunk(hunk, d);
       h += `<tr class="hunk"><td class="ln" colspan="2"></td><td class="code">${hunkLabel(hunk)}</td></tr>`;
       for (const l of hunk.lines) {
         const c = CLS[l.t];
@@ -726,7 +790,7 @@
 
     let h = '<table class="diff split"><colgroup><col class="c-ln"><col><col class="c-ln"><col></colgroup><tbody>';
     for (const hunk of d.hunks) {
-      prepareHunk(hunk);
+      prepareHunk(hunk, d);
       h += `<tr class="hunk"><td class="code" colspan="4">${hunkLabel(hunk)}</td></tr>`;
       const L = hunk.lines;
       for (let i = 0; i < L.length;) {
@@ -759,6 +823,14 @@
     state.view = view;
     LS.set('view', view);
     for (const b of el.viewToggle.querySelectorAll('button')) b.classList.toggle('on', b.dataset.view === view);
+    if (rerender && state.changes.length) rerenderDiffs();
+  }
+
+  function setHighlight(on, rerender = true) {
+    state.highlight = on;
+    LS.set('highlight', on);
+    el.hlToggle.classList.toggle('on', on);
+    el.hlToggle.setAttribute('aria-pressed', String(on));
     if (rerender && state.changes.length) rerenderDiffs();
   }
 
@@ -898,6 +970,7 @@
       const b = e.target.closest('button[data-view]');
       if (b && b.dataset.view !== state.view) setView(b.dataset.view);
     });
+    el.hlToggle.addEventListener('click', () => setHighlight(!state.highlight));
 
     el.fileList.addEventListener('click', (e) => {
       const dir = e.target.closest('.dir-item');
@@ -977,6 +1050,7 @@
     I18n.onChange(onLocaleChange);
     setupPanels();
     setView(state.view, false);
+    setHighlight(state.highlight, false);
     setFileMode(state.fileMode, false);
     bindEvents();
 

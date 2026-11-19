@@ -178,27 +178,34 @@
 
   const TOKEN = /[\p{L}\p{N}_]+|\s+|[^\p{L}\p{N}_\s]/gu;
 
-  // Destaque de palavras alteradas entre duas linhas. Retorna [htmlAntigo, htmlNovo] ou null.
+  /* Palavras alteradas entre duas linhas.
+   * Retorna [intervalosAntigo, intervalosNovo], cada um uma lista ordenada de [início, fim)
+   * em caracteres, ou null quando as linhas são diferentes demais para valer o destaque. */
   function intraline(oldText, newText) {
     if (oldText.length > 1000 || newText.length > 1000) return null;
     const a = oldText.match(TOKEN) || [], b = newText.match(TOKEN) || [];
     const ops = diffSeq(a, b, 200);
-    let same = 0, ai = 0, bi = 0;
-    const segA = [], segB = [];
-    const push = (seg, changed, s) => {
-      const last = seg[seg.length - 1];
-      if (last && last.c === changed) last.s += s;
-      else seg.push({ c: changed, s });
+    let same = 0, ai = 0, bi = 0, pa = 0, pb = 0;
+    const ra = [], rb = [];
+    const add = (ranges, start, end) => {
+      const last = ranges[ranges.length - 1];
+      if (last && last[1] === start) last[1] = end;
+      else ranges.push([start, end]);
     };
     for (const o of ops) {
-      if (o === 0) { same += a[ai].length; push(segA, false, a[ai++]); push(segB, false, b[bi++]); }
-      else if (o === 1) push(segA, true, a[ai++]);
-      else push(segB, true, b[bi++]);
+      if (o === 0) {
+        same += a[ai].length;
+        pa += a[ai++].length;
+        pb += b[bi++].length;
+      } else if (o === 1) {
+        add(ra, pa, (pa += a[ai++].length));
+      } else {
+        add(rb, pb, (pb += b[bi++].length));
+      }
     }
     const total = Math.max(oldText.length, newText.length);
     if (total && same / total < 0.35) return null; // linhas muito diferentes: sem destaque
-    const html = (seg) => seg.map((p) => (p.c ? `<mark>${escapeHtml(p.s)}</mark>` : escapeHtml(p.s))).join('');
-    return [html(segA), html(segB)];
+    return [ra, rb];
   }
 
   window.Diff = { diffSeq, diffLines, buildHunks, splitLines, intraline, escapeHtml };

@@ -12,6 +12,8 @@ I18n.register('pt-BR', {
       viewMode: 'Modo de exibição',
       unified: 'Unificado',
       split: 'Lado a lado',
+      highlight: 'Sintaxe',
+      highlightTitle: 'Realce de sintaxe pela extensão do arquivo (C#, JS, TS, HTML, CSS, Razor, Vue, Python, C, C++, Java)',
       language: 'Idioma',
     },
     panels: {
